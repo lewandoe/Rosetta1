@@ -62,7 +62,7 @@ class TradeLogger:
     """
 
     def __init__(self, path: Optional[str] = None) -> None:
-        db_path = Path(path) if path else Path(settings.monitoring.db_path)
+        db_path = Path(path) if path else Path("/Users/eric/Rosetta1/db/trades.db")
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self._path = str(db_path)

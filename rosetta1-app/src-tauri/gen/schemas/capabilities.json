@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default capabilities for Rosetta1","local":true,"windows":["main"],"permissions":["core:default","core:event:allow-listen","core:event:allow-emit","core:window:allow-minimize","core:window:allow-maximize","core:window:allow-close","core:window:allow-start-dragging","core:webview:allow-internal-toggle-devtools"]}}

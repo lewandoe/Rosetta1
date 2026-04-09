@@ -1,0 +1,25 @@
+[package]
+name        = "rosetta1-app"
+version     = "1.0.0"
+edition     = "2021"
+description = "Rosetta1 trading bot desktop shell"
+
+# Note: `shell-open` was a Tauri v1 feature; in Tauri v2 it moved to
+# tauri-plugin-opener. We don't need external-URL opening, so features = [].
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri      = { version = "2", features = [] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite   = { version = "0.31", features = ["bundled"] }
+tokio      = { version = "1",    features = ["full"] }
+chrono     = "0.4"
+
+[profile.release]
+panic         = "abort"
+codegen-units = 1
+lto           = true
+opt-level     = "s"
+strip         = true

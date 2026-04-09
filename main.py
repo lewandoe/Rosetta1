@@ -50,6 +50,7 @@ from broker.paper import PaperBroker
 from config.settings import UNIVERSE, settings
 from data.feed import FeedManager
 from data.history import seed_bars, HistoryError
+from data.indicators import add_all
 from execution.order_manager import OrderManager
 from risk.guard import RiskGuard
 from signals.base import SignalResult
@@ -158,7 +159,11 @@ class Rosetta1:
         logger.info("Seeding OHLCV bars…")
         for sym in self._symbols:
             try:
-                self._bars[sym] = seed_bars(sym)
+                raw = seed_bars(sym)
+                raw.columns = [c.lower() for c in raw.columns]
+                if len(raw) > 0 and (raw["volume"].iloc[-1] == 0 or pd.isna(raw["volume"].iloc[-1])):
+                    raw = raw.iloc[:-1]
+                self._bars[sym] = add_all(raw)
                 logger.info("Seeded bars for %s (%d rows)", sym, len(self._bars[sym]))
             except HistoryError as exc:
                 logger.warning("Could not seed bars for %s: %s — skipping", sym, exc)
@@ -199,7 +204,25 @@ class Rosetta1:
         if bars is None or len(bars) < 30:
             return
 
+        if bars["volume"].iloc[-1] == 0 or pd.isna(bars["volume"].iloc[-1]):
+            bars = bars.iloc[:-1]
+
+        if len(bars) < 30:
+            return
+
+        if not quote.last or quote.last <= 0:
+            return
+
         try:
+            # ── Refresh indicators with latest quote price ────────────────
+            # Update the last bar's close to the current quote, then
+            # recompute all indicator columns.  add_all() is fast enough
+            # here because the feed only delivers quotes every 10 s.
+            bars = bars.copy()
+            bars.loc[bars.index[-1], "close"] = quote.last
+            bars = add_all(bars)
+            self._bars[symbol] = bars
+
             # ── Signal evaluation ─────────────────────────────────────────
             signal: Optional[SignalResult] = self._engine.evaluate(
                 bars, symbol, quote.last

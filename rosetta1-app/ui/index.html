@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rosetta1</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+
+  <!--
+    Import map — resolves bare @tauri-apps/api specifiers in app.js
+    (module script) to the esm.sh CDN. Tauri v2 injects
+    window.__TAURI_INTERNALS__ before the page loads, so these CDN
+    modules will find the IPC bridge.  CSP is null in tauri.conf.json.
+  -->
+  
+</head>
+<body>
+
+  <!-- ══════════════════════════════════════════════════════════════════════
+       CUSTOM TITLEBAR — data-tauri-drag-region makes it draggable
+       ══════════════════════════════════════════════════════════════════════ -->
+  <header id="titlebar" data-tauri-drag-region>
+    <!-- Left: 72 px mac traffic-light spacer + app name -->
+    <div class="tb-left" data-tauri-drag-region>
+      <span class="tb-name">ROSETTA1</span>
+      <span class="tb-ver">v1.0.0</span>
+    </div>
+
+    <!-- Center: mode badge + market status + alert badges -->
+    <div class="tb-center" data-tauri-drag-region>
+      <span class="mode-badge paper" id="tb-mode">PAPER</span>
+      <span class="mkt-status" id="tb-market">● MARKET CLOSED</span>
+      <span class="err-badge hidden" id="tb-errors">0 ERR</span>
+      <span class="halt-badge hidden" id="tb-halt">⬛ HALTED</span>
+    </div>
+
+    <!-- Right: window controls (no-drag zone) -->
+    <div class="tb-right">
+      <button class="wc" id="wc-min"  title="Minimize">&#8722;</button>
+      <button class="wc" id="wc-max"  title="Maximize">&#9633;</button>
+      <button class="wc close" id="wc-close" title="Close">&#10005;</button>
+    </div>
+  </header>
+
+  <!-- ══════════════════════════════════════════════════════════════════════
+       SHELL
+       ══════════════════════════════════════════════════════════════════════ -->
+  <div id="shell">
+
+    <!-- ── SIDEBAR ────────────────────────────────────────────────────── -->
+    <nav id="sidebar">
+      <div class="nav-top">
+        <button class="nb active" data-sec="setup" title="Setup">
+          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          <span>Setup</span>
+        </button>
+        <button class="nb" data-sec="dashboard" title="Dashboard">
+          <svg viewBox="0 0 24 24"><path d="M3 9h18M3 15h18"/><circle cx="12" cy="12" r="9"/></svg>
+          <span>Board</span>
+        </button>
+        <button class="nb" data-sec="signals" title="Signal Scanner">
+          <svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+          <span>Signals</span>
+        </button>
+        <button class="nb" data-sec="tradelog" title="Trade Log">
+          <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+          <span>Trades</span>
+        </button>
+        <button class="nb" data-sec="performance" title="Performance">
+          <svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+          <span>Perf</span>
+        </button>
+        <button class="nb" data-sec="settings" title="Settings">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>Settings</span>
+        </button>
+        <button class="nb" data-sec="syslog" title="System Log">
+          <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+          <span>Log</span>
+        </button>
+      </div>
+
+      <div class="nav-bot">
+        <div class="nav-sep"></div>
+        <button class="nb stop hidden" id="nb-stop" title="Stop Bot">
+          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" fill="currentColor"/></svg>
+          <span>Stop</span>
+        </button>
+        <button class="nb halt" id="nb-halt" title="Emergency Halt">
+          <svg viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <span>HALT</span>
+        </button>
+      </div>
+    </nav>
+
+    <!-- ── MAIN CONTENT ────────────────────────────────────────────────── -->
+    <main id="content">
+
+      <!-- ═══ SECTION 1: SETUP ══════════════════════════════════════════ -->
+      <section id="sec-setup" class="sec active">
+        <div class="sec-hdr">
+          <h1>Session Setup</h1>
+          <p class="sub">Run the checks, pick your mode and symbols, then start the bot.</p>
+        </div>
+
+        <!-- Checklist -->
+        <div class="card">
+          <div class="card-ttl">System Checks</div>
+          <div id="checklist">
+            <div class="chk" id="chk-venv">
+              <span class="chk-icon pend">○</span>
+              <div>
+                <div class="chk-lbl">Virtual environment (.venv)</div>
+                <div class="chk-fix hidden">Run in repo root: <code>python3 -m venv .venv &amp;&amp; .venv/bin/pip install -r requirements.txt</code></div>
+              </div>
+            </div>
+            <div class="chk" id="chk-env">
+              <span class="chk-icon pend">○</span>
+              <div>
+                <div class="chk-lbl">.env file present</div>
+                <div class="chk-fix hidden">Run: <code>cp .env.example .env</code> then fill in credentials.</div>
+              </div>
+            </div>
+            <div class="chk" id="chk-db">
+              <span class="chk-icon pend">○</span>
+              <div>
+                <div class="chk-lbl">Database directory (db/)</div>
+                <div class="chk-fix hidden">Run: <code>mkdir -p /Users/eric/Rosetta1/db</code></div>
+              </div>
+            </div>
+          </div>
+          <button class="btn-sec sm" id="btn-recheck" style="margin-top:12px">Re-check</button>
+        </div>
+
+        <!-- Mode -->
+        <div class="card">
+          <div class="card-ttl">Trading Mode</div>
+          <div class="mode-row">
+            <button class="mode-btn active" data-mode="paper" id="mbtn-paper">PAPER</button>
+            <button class="mode-btn"        data-mode="live"  id="mbtn-live">LIVE</button>
+          </div>
+          <div class="live-warn hidden" id="live-warn">
+            <svg viewBox="0 0 24 24" width="16" height="16"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            You are about to place <strong>real orders with real money</strong>.
+            Only proceed if you have fully validated this system in paper mode.
+          </div>
+        </div>
+
+        <!-- Symbols -->
+        <div class="card">
+          <div class="card-ttl-row">
+            <div class="card-ttl" style="margin:0">Symbols</div>
+            <div style="display:flex;gap:6px">
+              <button class="btn-sec sm" id="btn-selall">Select all</button>
+              <button class="btn-sec sm" id="btn-clrall">Clear all</button>
+            </div>
+          </div>
+          <div class="pills" id="sym-pills">
+            <button class="pill active" data-sym="SPY">SPY</button>
+            <button class="pill active" data-sym="QQQ">QQQ</button>
+            <button class="pill active" data-sym="TSLA">TSLA</button>
+            <button class="pill active" data-sym="NVDA">NVDA</button>
+            <button class="pill active" data-sym="AAPL">AAPL</button>
+            <button class="pill active" data-sym="MSFT">MSFT</button>
+            <button class="pill active" data-sym="GOOGL">GOOGL</button>
+            <button class="pill active" data-sym="AMZN">AMZN</button>
+            <button class="pill active" data-sym="META">META</button>
+            <button class="pill active" data-sym="AMD">AMD</button>
+          </div>
+        </div>
+
+        <!-- Log level -->
+        <div class="card">
+          <div class="card-ttl">Log Level</div>
+          <select id="log-lvl" class="sel">
+            <option value="INFO" selected>INFO</option>
+            <option value="DEBUG">DEBUG</option>
+            <option value="WARNING">WARNING</option>
+            <option value="ERROR">ERROR</option>
+          </select>
+        </div>
+
+        <!-- Start -->
+        <div class="start-row">
+          <button class="btn-pri" id="btn-start">
+            <span id="start-lbl">Start Session</span>
+            <span class="spin hidden" id="start-spin"></span>
+          </button>
+          <div class="start-err hidden" id="start-err"></div>
+        </div>
+      </section>
+
+      <!-- ═══ SECTION 2: DASHBOARD ══════════════════════════════════════ -->
+      <section id="sec-dashboard" class="sec">
+
+        <div class="eod-banner hidden" id="eod-banner">✓ EOD — All positions closed. Session winding down.</div>
+
+        <div class="metrics">
+          <div class="mc"><div class="mc-lbl">Today P&amp;L</div><div class="mc-val mono" id="m-pnl">$0.00</div></div>
+          <div class="mc"><div class="mc-lbl">Win Rate</div><div class="mc-val mono" id="m-wr">0.0%</div></div>
+          <div class="mc"><div class="mc-lbl">Open Positions</div><div class="mc-val mono" id="m-pos">0 / 3</div></div>
+          <div class="mc"><div class="mc-lbl">Daily Loss Remaining</div><div class="mc-val mono" id="m-dlr">$200.00</div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-ttl-row">
+            <div class="card-ttl" style="margin:0">Daily Loss Limit</div>
+            <div class="loss-lbls">
+              <span id="loss-used">$0.00 used</span>
+              <span id="loss-rem">$200.00 remaining</span>
+            </div>
+          </div>
+          <div class="prog-track"><div class="prog-fill" id="loss-bar" style="width:0%"></div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-ttl-row">
+            <div class="card-ttl" style="margin:0">Day Trade Counter</div>
+            <div class="pdt-lbl" id="pdt-lbl">0 of 3 day trades used (rolling 5 days)</div>
+          </div>
+          <div class="pdt-dots">
+            <div class="dot" id="dot-0"></div>
+            <div class="dot" id="dot-1"></div>
+            <div class="dot" id="dot-2"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-ttl">Open Positions</div>
+          <div class="tbl-wrap">
+            <table id="pos-tbl">
+              <thead><tr>
+                <th>Symbol</th><th>Direction</th><th>Signal</th>
+                <th>Entry</th><th>Current</th><th>P&amp;L</th>
+                <th>Hold</th><th></th>
+              </tr></thead>
+              <tbody id="pos-body">
+                <tr class="erow"><td colspan="8">No open positions — scanning for signals</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══ SECTION 3: SIGNAL SCANNER ════════════════════════════════ -->
+      <section id="sec-signals" class="sec">
+        <div class="sec-hdr">
+          <h1>Signal Scanner</h1>
+          <p class="sub">Live signal evaluation across the trading universe.</p>
+        </div>
+        <div class="sig-grid" id="sig-grid"><!-- JS populated --></div>
+      </section>
+
+      <!-- ═══ SECTION 4: TRADE LOG ══════════════════════════════════════ -->
+      <section id="sec-tradelog" class="sec">
+        <div class="sec-hdr-row">
+          <h1>Trade Log</h1>
+          <button class="btn-sec sm" id="btn-csv">Export CSV</button>
+        </div>
+        <div class="card">
+          <div class="tbl-wrap">
+            <table id="trade-tbl">
+              <thead><tr>
+                <th>Time</th><th>Symbol</th><th>Signal</th>
+                <th>Entry</th><th>Exit</th><th>Shares</th>
+                <th>P&amp;L</th><th>Hold</th><th>Reason</th>
+              </tr></thead>
+              <tbody id="trade-body">
+                <tr class="erow"><td colspan="9">No trades recorded today</td></tr>
+              </tbody>
+              <tfoot id="trade-foot" class="hidden">
+                <tr class="tot-row">
+                  <td colspan="6" class="tot-lbl">Totals</td>
+                  <td class="mono" id="tot-pnl">$0.00</td>
+                  <td></td>
+                  <td id="tot-wl"></td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══ SECTION 5: PERFORMANCE ════════════════════════════════════ -->
+      <section id="sec-performance" class="sec">
+        <div class="sec-hdr-row">
+          <h1>Performance</h1>
+          <div class="range-tabs">
+            <button class="rtab active" data-range="today">Today</button>
+            <button class="rtab"        data-range="week">This Week</button>
+            <button class="rtab"        data-range="all">All Time</button>
+          </div>
+        </div>
+        <div class="metrics">
+          <div class="mc"><div class="mc-lbl">Total P&amp;L</div><div class="mc-val mono" id="p-pnl">$0.00</div></div>
+          <div class="mc"><div class="mc-lbl">Sharpe Ratio</div><div class="mc-val mono" id="p-sharpe">0.00</div></div>
+          <div class="mc"><div class="mc-lbl">Win Rate</div><div class="mc-val mono" id="p-wr">0.0%</div></div>
+          <div class="mc"><div class="mc-lbl">Max Drawdown</div><div class="mc-val mono" id="p-dd">$0.00</div></div>
+        </div>
+        <div class="chart-card">
+          <div class="card-ttl">Equity Curve</div>
+          <div class="chart-wrap"><canvas id="eq-chart"></canvas></div>
+        </div>
+        <div class="chart-card">
+          <div class="card-ttl">Win / Loss by Signal Type</div>
+          <div class="chart-wrap"><canvas id="sig-chart"></canvas></div>
+        </div>
+      </section>
+
+      <!-- ═══ SECTION 6: SETTINGS ══════════════════════════════════════ -->
+      <section id="sec-settings" class="sec">
+        <div class="sec-hdr">
+          <h1>Risk Settings</h1>
+          <p class="sub">Values are written to /Users/eric/Rosetta1/.env and take effect on the next session start.</p>
+        </div>
+        <div class="card">
+          <div class="sett-grid">
+            <div class="srow"><label>Max Daily Loss ($)</label><input type="number" id="s-loss"    class="sinp" min="0"   step="10"  /></div>
+            <div class="srow"><label>Max Open Positions</label><input type="number" id="s-pos"     class="sinp" min="1" max="5" step="1"  /></div>
+            <div class="srow"><label>Capital per Trade (%)</label><input type="number" id="s-cap"  class="sinp" min="1" max="50" step="1"  /></div>
+            <div class="srow"><label>Stop Loss Distance (%)</label><input type="number" id="s-stop" class="sinp" min="0.1" max="10" step="0.1"/></div>
+            <div class="srow"><label>Min Confidence Score</label><input type="number" id="s-conf"  class="sinp" min="0" max="100" step="1"  /></div>
+            <div class="srow"><label>EOD Close — Minutes Before Market Close</label><input type="number" id="s-eod" class="sinp" min="1" max="60" step="1"  /></div>
+          </div>
+          <div class="sett-acts">
+            <button class="btn-pri" id="btn-save-sett">Save</button>
+            <button class="btn-sec"  id="btn-rst-sett">Reset to Defaults</button>
+          </div>
+          <div class="sett-note hidden" id="sett-note">⚠ Restart the session for changes to take effect.</div>
+        </div>
+      </section>
+
+      <!-- ═══ SECTION 7: SYSTEM LOG ═════════════════════════════════════ -->
+      <section id="sec-syslog" class="sec">
+        <div class="sec-hdr-row">
+          <h1>System Log</h1>
+          <div style="display:flex;gap:8px">
+            <button class="btn-sec sm" id="btn-clrlog">Clear</button>
+            <button class="btn-sec sm" id="btn-cpylog">Copy All</button>
+          </div>
+        </div>
+        <div class="log-panel" id="log-panel">
+          <div class="log-empty">Waiting for bot output…</div>
+        </div>
+      </section>
+
+    </main>
+  </div><!-- /shell -->
+
+  <!-- ══════════════════════════════════════════════════════════════════════
+       SESSION SUMMARY MODAL — not dismissable by clicking outside
+       ══════════════════════════════════════════════════════════════════════ -->
+  <div id="modal-bg" class="hidden">
+    <div id="modal">
+      <div class="modal-ttl">Session Complete</div>
+      <div class="modal-metrics">
+        <div class="mm"><div class="mm-lbl">Total Trades</div><div class="mm-val mono" id="sm-trades">0</div></div>
+        <div class="mm"><div class="mm-lbl">Win Rate</div><div class="mm-val mono" id="sm-wr">0%</div></div>
+        <div class="mm"><div class="mm-lbl">Total P&amp;L</div><div class="mm-val mono" id="sm-pnl">$0.00</div></div>
+        <div class="mm"><div class="mm-lbl">Best Trade</div><div class="mm-val mono green" id="sm-best">$0.00</div></div>
+        <div class="mm"><div class="mm-lbl">Worst Trade</div><div class="mm-val mono red" id="sm-worst">$0.00</div></div>
+        <div class="mm"><div class="mm-lbl">Sharpe Ratio</div><div class="mm-val mono" id="sm-sharpe">0.00</div></div>
+      </div>
+      <div class="modal-acts">
+        <button class="btn-pri" id="btn-new-sess">Start New Session</button>
+        <button class="btn-sec" id="btn-view-perf">View Full Performance</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chart.js (loaded before app.js module so Chart is global) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+
+  <!-- App — ES module, imports resolved via importmap above -->
+  <script src="app.js"></script>
+</body>
+</html>
