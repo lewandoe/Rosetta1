@@ -131,7 +131,14 @@ class Rosetta1:
         }
 
         # ── Wire trade-closed callbacks ──────────────────────────────────────
-        self._om.on_trade_closed(self._logger.log_trade)
+        def _safe_log_trade(ct):
+            try:
+                self._logger.log_trade(ct)
+            except Exception as exc:
+                import traceback
+                logger.error("TRADE LOG FAILED: %s\n%s", exc, traceback.format_exc())
+
+        self._om.on_trade_closed(_safe_log_trade)
 
         # ── Per-symbol quote callbacks ───────────────────────────────────────
         for sym in self._symbols:
