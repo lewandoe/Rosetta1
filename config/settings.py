@@ -14,7 +14,22 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # ---------------------------------------------------------------------------
 # Target universe — trade ONLY these symbols
 # ---------------------------------------------------------------------------
-UNIVERSE: List[str] = ["SPY", "TSLA", "NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "AMD", "QQQ"]
+UNIVERSE: List[str] = [
+    # Original Focus 10
+    "SPY", "TSLA", "NVDA", "AAPL", "MSFT",
+    "GOOGL", "AMZN", "META", "AMD", "QQQ",
+    # High volume additions (market cap > $500M)
+    "INTC",  # Intel — high volume semiconductor
+    "PLTR",  # Palantir — AI/data, very high retail volume
+    "NFLX",  # Netflix — mega-cap, high daily volume
+    "AVGO",  # Broadcom — semiconductor leader
+    "MU",    # Micron Technology — memory/AI chips
+    "MRVL",  # Marvell Technology — data infrastructure
+    "CRM",   # Salesforce — enterprise software
+    "COIN",  # Coinbase — crypto proxy, extreme volume
+    "BABA",  # Alibaba — high volume international
+    "UBER",  # Uber — high volume consumer tech
+]
 
 
 # ---------------------------------------------------------------------------
@@ -88,9 +103,9 @@ class SignalSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # Only fire signals above this confidence threshold
-    min_confidence_score: int = Field(default=70, description="Minimum signal confidence (0–100)")
+    min_confidence_score: int = Field(default=62, description="Minimum signal confidence (0–100)")
     disabled_signals: list[str] = Field(
-        default=["momentum", "orb"],
+        default=["orb"],
         description="Signal types to skip. Valid: momentum, vwap_cross, ema_cross, orb, rsi"
     )
 

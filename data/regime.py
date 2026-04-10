@@ -53,10 +53,10 @@ def classify_regime(df: pd.DataFrame) -> RegimeResult:
 
 # Which regimes each strategy is valid in
 STRATEGY_VALID_REGIMES: dict[str, list[Regime]] = {
-    "momentum":   [Regime.TRENDING],
-    "ema_cross":  [Regime.TRENDING, Regime.MIXED],
-    "orb":        [Regime.TRENDING, Regime.MIXED],
-    "vwap_cross": [Regime.RANGING, Regime.MIXED],
+    "momentum":     [Regime.TRENDING, Regime.MIXED],
+    "ema_cross":    [Regime.TRENDING, Regime.MIXED, Regime.RANGING],
+    "orb":          [Regime.TRENDING, Regime.MIXED],
+    "vwap_cross":   [Regime.TRENDING, Regime.RANGING, Regime.MIXED],
     "rsi_reversal": [Regime.RANGING, Regime.MIXED],
 }
 
