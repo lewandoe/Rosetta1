@@ -104,6 +104,20 @@ class SignalSettings(BaseSettings):
 
     # Only fire signals above this confidence threshold
     min_confidence_score: int = Field(default=62, description="Minimum signal confidence (0–100)")
+    macro_bias_enabled: bool = Field(
+        default=True,
+        description="Only take longs when SPY is above VWAP and trending up. "
+                    "Only take shorts when SPY is below VWAP and trending down. "
+                    "Most impactful filter for avoiding trades against the market."
+    )
+    macro_bias_symbol: str = Field(
+        default="SPY",
+        description="Symbol to use as macro bias indicator."
+    )
+    macro_bias_bars: int = Field(
+        default=10,
+        description="Number of bars to measure SPY trend direction."
+    )
     disabled_signals: list[str] = Field(
         default=["orb"],
         description="Signal types to skip. Valid: momentum, vwap_cross, ema_cross, orb, rsi"

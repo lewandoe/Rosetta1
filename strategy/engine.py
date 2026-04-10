@@ -46,6 +46,38 @@ logger = logging.getLogger(__name__)
 CONSENSUS_BONUS = 5
 
 
+
+def _get_macro_bias(bars_dict: dict) -> str | None:
+    """
+    Returns 'long', 'short', or None based on SPY vs VWAP.
+    None means no clear bias — allow both directions.
+    """
+    from config.settings import settings
+    if not settings.signals.macro_bias_enabled:
+        return None
+    
+    spy_bars = bars_dict.get(settings.signals.macro_bias_symbol)
+    if spy_bars is None or len(spy_bars) < settings.signals.macro_bias_bars + 1:
+        return None
+    
+    try:
+        from data.indicators import latest
+        spy_price = latest(spy_bars, "close")
+        spy_vwap = latest(spy_bars, "vwap")
+        spy_close_n = float(spy_bars["close"].iloc[-(settings.signals.macro_bias_bars + 1)])
+        
+        above_vwap = spy_price > spy_vwap
+        trending_up = spy_price > spy_close_n
+        
+        if above_vwap and trending_up:
+            return "long"
+        elif not above_vwap and not trending_up:
+            return "short"
+        else:
+            return None  # mixed — allow both
+    except Exception:
+        return None
+
 class SignalEngine:
     """
     Aggregates all 5 signal strategies for a single symbol.
@@ -95,7 +127,7 @@ class SignalEngine:
         if not raw_signals:
             return None
 
-        best = self._aggregate(raw_signals)
+        best = self._aggregate(raw_signals, bars_dict=bars_dict)
 
         if best is None:
             return None
@@ -230,13 +262,26 @@ class SignalEngine:
                 )
         return results
 
-    def _aggregate(self, signals: List[SignalResult]) -> Optional[SignalResult]:
+    def _aggregate(self, signals: List[SignalResult], bars_dict: dict | None = None) -> Optional[SignalResult]:
         """
         Apply consensus boosting and return the best signal.
 
         Groups by direction, finds dominant group, boosts the top signal
         in that group by CONSENSUS_BONUS per additional confirming strategy.
         """
+        # Apply macro bias filter — only allow signals aligned with SPY trend
+        macro_bias = _get_macro_bias(bars_dict or {})
+        if macro_bias is not None:
+            signals = [s for s in signals if s.direction == macro_bias]
+            if signals:
+                logger.info(
+                    "MacroBias: SPY bias=%s — filtered to %d aligned signal(s)",
+                    macro_bias, len(signals)
+                )
+            else:
+                logger.debug("MacroBias: SPY bias=%s — all signals filtered out", macro_bias)
+                return None
+
         by_direction: Dict[str, List[SignalResult]] = {"long": [], "short": []}
         for sig in signals:
             by_direction[sig.direction].append(sig)
