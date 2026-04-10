@@ -64,12 +64,35 @@ class RiskSettings(BaseSettings):
     # Max loss per trade must not exceed this multiple of the target gain
     max_loss_to_gain_ratio: float = Field(default=2.0, description="Max risk/reward ratio (loss ≤ 2× gain)")
 
+    # ATR-normalized position sizing
+    target_risk_per_trade_pct: float = Field(
+        default=0.005,
+        ge=0.001,
+        le=0.02,
+        description="Target dollar risk per trade as fraction of account value. "
+                    "0.005 = risk 0.5% per trade. On $35k account = $175 risk per trade. "
+                    "Stop distance determines share count.",
+    )
+    min_shares: int = Field(
+        default=1,
+        description="Minimum shares per trade regardless of sizing.",
+    )
+    max_shares: int = Field(
+        default=500,
+        description="Hard ceiling on shares per trade. "
+                    "Prevents runaway sizing on very low ATR symbols.",
+    )
+
 
 class SignalSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # Only fire signals above this confidence threshold
     min_confidence_score: int = Field(default=70, description="Minimum signal confidence (0–100)")
+    disabled_signals: list[str] = Field(
+        default=["momentum", "orb"],
+        description="Signal types to skip. Valid: momentum, vwap_cross, ema_cross, orb, rsi"
+    )
 
     # EMA periods used by ema_cross strategy
     ema_fast: int = Field(default=8)
@@ -102,6 +125,42 @@ class SignalSettings(BaseSettings):
         description="Target distance as multiple of stop distance. "
                     "1.5 = target is 1.5× further than stop. "
                     "Higher = larger wins but lower win rate.",
+    )
+
+    # Cross-symbol sector confirmation
+    sector_confirmation_enabled: bool = Field(
+        default=True,
+        description="Adjust confidence based on sector ETF alignment.",
+    )
+    sector_confirmation_bonus: int = Field(
+        default=8,
+        description="Confidence points added when sector ETF agrees with signal direction.",
+    )
+    sector_confirmation_penalty: int = Field(
+        default=12,
+        description="Confidence points deducted when sector ETF disagrees with signal direction. "
+                    "Higher than bonus because fighting the sector is riskier than missing a move.",
+    )
+    sector_trend_bars: int = Field(
+        default=5,
+        description="Number of recent bars to measure ETF trend direction.",
+    )
+
+    # Market regime filter
+    regime_trending_threshold: float = Field(
+        default=0.30,
+        description="Regime score above this = trending market. "
+                    "Momentum and EMA cross signals preferred.",
+    )
+    regime_ranging_threshold: float = Field(
+        default=0.15,
+        description="Regime score below this = ranging market. "
+                    "VWAP reversion signals preferred. "
+                    "Momentum signals suppressed.",
+    )
+    regime_lookback: int = Field(
+        default=20,
+        description="Number of bars for regime classification.",
     )
 
 

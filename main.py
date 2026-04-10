@@ -207,7 +207,8 @@ class Rosetta1:
         try:
             # ── Signal evaluation ─────────────────────────────────────────
             signal: Optional[SignalResult] = self._engine.evaluate(
-                bars, symbol, quote.last
+                bars, symbol, quote.last,
+                bars_dict=self._bars,
             )
             if signal is None:
                 return
@@ -221,10 +222,19 @@ class Rosetta1:
             )
 
             if not decision.approved:
-                logger.debug(
-                    "RiskGuard rejected %s %s: %s",
-                    symbol, signal.direction, decision.reason,
-                )
+                if decision.exit_existing:
+                    self._om.exit_trade_by_symbol(signal.symbol)
+                elif decision.update_existing:
+                    self._om.update_trade_exits(
+                        signal.symbol,
+                        decision.new_target_price,
+                        decision.new_stop_price,
+                    )
+                else:
+                    logger.debug(
+                        "RiskGuard rejected %s %s: %s",
+                        symbol, signal.direction, decision.reason,
+                    )
                 return
 
             # ── Execute ───────────────────────────────────────────────────

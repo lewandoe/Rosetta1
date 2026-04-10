@@ -58,6 +58,12 @@ class RiskDecision:
     checks_failed: List[str] = field(default_factory=list)
     position_size: int = 0         # shares to trade; 0 if rejected
     capital_allocated: float = 0.0 # USD value of the position
+    # Set when a duplicate-symbol signal should update the existing trade's exits
+    update_existing: bool = False
+    new_target_price: Optional[float] = None
+    new_stop_price: Optional[float] = None
+    # Set when the new signal conflicts with the existing position's direction
+    exit_existing: bool = False
 
     def __str__(self) -> str:
         if self.approved:
@@ -186,11 +192,34 @@ class RiskGuard:
                            f"{settings.risk.max_open_positions})")
         passed.append("max_positions")
 
-        # ── 4b. Duplicate symbol ─────────────────────────────────────────────
-        open_symbols = [p.symbol for p in open_positions]
-        if signal.symbol in open_symbols:
-            return _reject("duplicate_symbol",
-                           f"Already have open position in {signal.symbol}")
+        # ── 4b. Duplicate symbol — exit on reversal, update exits otherwise ───
+        existing_pos = next(
+            (p for p in open_positions if p.symbol == signal.symbol), None
+        )
+        if existing_pos is not None:
+            directions_conflict = (
+                (existing_pos.quantity > 0 and signal.direction == "short") or
+                (existing_pos.quantity < 0 and signal.direction == "long")
+            )
+            if directions_conflict:
+                logger.info(
+                    "RiskGuard [%s]: signal reversal detected — exiting existing %s position",
+                    signal.symbol, "long" if existing_pos.quantity > 0 else "short",
+                )
+            else:
+                logger.info(
+                    "RiskGuard [%s]: duplicate signal — updating exits target=%.4f stop=%.4f",
+                    signal.symbol, signal.target_price, signal.stop_price,
+                )
+            return RiskDecision(
+                approved=False,
+                exit_existing=directions_conflict,
+                update_existing=not directions_conflict,
+                new_target_price=signal.target_price,
+                new_stop_price=signal.stop_price,
+                reason="signal_reversal" if directions_conflict
+                       else "duplicate_symbol — updating exits",
+            )
         passed.append("duplicate_symbol")
 
         # ── 5. PDT limit ────────────────────────────────────────────────────
@@ -211,26 +240,40 @@ class RiskGuard:
                            f"{settings.risk.max_spread_pct*100:.2f}%")
         passed.append("spread_filter")
 
-        # ── 7. Capital limit + position sizing ──────────────────────────────
-        max_capital = account.buying_power * settings.risk.max_capital_per_trade_pct
+        # ── 7. ATR-normalized position sizing ───────────────────────────────
         entry_price = signal.entry_price
         if entry_price <= 0:
             return _reject("capital_limit", "Signal entry_price is zero or negative")
 
-        shares = math.floor(max_capital / entry_price)
-        if shares < 1:
-            return _reject("capital_limit",
-                           f"Cannot afford even 1 share at ${entry_price:.2f} "
-                           f"with ${max_capital:.2f} allocated capital")
+        stop_distance = abs(entry_price - signal.stop_price)
+
+        # Risk-based share count: how many shares to risk target_risk_usd at stop
+        account_value = account.buying_power + account.portfolio_value
+        target_risk_usd = account_value * settings.risk.target_risk_per_trade_pct
+        risk_based_shares = (
+            math.floor(target_risk_usd / stop_distance) if stop_distance > 0 else 1
+        )
+
+        # Capital-based ceiling: never deploy more than max_capital_per_trade_pct
+        capital_budget = account.buying_power * settings.risk.max_capital_per_trade_pct
+        capital_based_max = math.floor(capital_budget / entry_price) if entry_price > 0 else 0
+
+        # Final share count: risk-based, capped by capital ceiling and hard limits
+        shares = max(
+            settings.risk.min_shares,
+            min(risk_based_shares, capital_based_max, settings.risk.max_shares),
+        )
 
         capital_used = shares * entry_price
         if capital_used > account.buying_power:
-            # Reduce by one share to stay within buying power
-            shares -= 1
+            shares = max(settings.risk.min_shares,
+                         math.floor(account.buying_power / entry_price))
             capital_used = shares * entry_price
-            if shares < 1:
-                return _reject("capital_limit",
-                               f"Insufficient buying power: ${account.buying_power:.2f}")
+
+        if shares < 1:
+            return _reject("capital_limit",
+                           f"Cannot size even 1 share at ${entry_price:.2f} "
+                           f"(buying_power=${account.buying_power:.2f})")
         passed.append("capital_limit")
 
         # ── 8. Risk/reward validation ────────────────────────────────────────
@@ -250,11 +293,16 @@ class RiskGuard:
         passed.append("stop_distance")
 
         # ── All checks passed ────────────────────────────────────────────────
+        binding = "risk" if risk_based_shares <= capital_based_max else "capital"
         logger.info(
-            "RiskGuard APPROVED [%s] %s %s | shares=%d capital=$%.2f | "
+            "RiskGuard APPROVED [%s] %s %s | shares=%d "
+            "risk=$%.2f stop_dist=$%.3f capital=$%.2f | "
+            "risk_based=%d cap_based=%d binding=%s | "
             "spread=%.3f%% rr=%.2f stop_dist=%.2f%%",
             signal.symbol, signal.direction.upper(), signal.signal_type,
-            shares, capital_used,
+            shares,
+            shares * stop_distance, stop_distance, capital_used,
+            risk_based_shares, capital_based_max, binding,
             spread * 100, rr, stop_dist_pct * 100,
         )
         return RiskDecision(

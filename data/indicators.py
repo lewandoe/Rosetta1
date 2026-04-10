@@ -266,6 +266,36 @@ def volume_ma(df: pd.DataFrame, period: Optional[int] = None,
 
 
 # ---------------------------------------------------------------------------
+# Regime score — directional efficiency ratio
+# ---------------------------------------------------------------------------
+
+def regime_score(df: pd.DataFrame, lookback: int = 20) -> float:
+    """
+    Classify market regime using directional efficiency ratio.
+
+    Formula: abs(net_move) / sum(abs(bar_moves))
+
+    Returns float 0.0 to 1.0:
+        > 0.30 = strongly trending
+        0.15 to 0.30 = mixed/transitional
+        < 0.15 = ranging/choppy
+
+    Requires at least lookback+1 rows.
+    """
+    _require_cols(df, "close", fn_name="regime_score")
+    _require_min_rows(df, lookback + 1, "regime_score")
+
+    closes = df["close"].iloc[-(lookback + 1):]
+    bar_moves = closes.diff().abs().iloc[1:]
+    total_movement = bar_moves.sum()
+    net_movement = abs(float(closes.iloc[-1]) - float(closes.iloc[0]))
+
+    if total_movement == 0:
+        return 0.0
+    return float(net_movement / total_movement)
+
+
+# ---------------------------------------------------------------------------
 # Convenience: compute all indicators in one call
 # ---------------------------------------------------------------------------
 

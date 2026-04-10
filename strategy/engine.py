@@ -31,6 +31,8 @@ from typing import Dict, List, Optional
 import pandas as pd
 
 from config.settings import settings
+from data.regime import classify_regime, is_strategy_valid_for_regime
+from data.sector import get_sector_etf, sector_confidence_adjustment
 from signals.base import BaseSignal, SignalResult
 from signals.momentum import MomentumSignal
 from signals.vwap import VwapSignal
@@ -73,6 +75,7 @@ class SignalEngine:
         df: pd.DataFrame,
         symbol: str,
         current_price: float,
+        bars_dict: dict[str, pd.DataFrame] | None = None,
     ) -> Optional[SignalResult]:
         """
         Run all strategies, aggregate, return best signal or None.
@@ -81,9 +84,11 @@ class SignalEngine:
             df:            add_all() DataFrame — must have all indicator columns.
             symbol:        Ticker being evaluated.
             current_price: Latest quote price (ask for long entry reference).
+            bars_dict:     All symbols' bar DataFrames keyed by symbol, used for
+                           cross-symbol sector ETF confirmation scoring.
 
         Returns:
-            Best SignalResult after consensus boosting, or None.
+            Best SignalResult after consensus boosting and sector adjustment, or None.
         """
         raw_signals = self._run_all(df, symbol, current_price)
 
@@ -95,12 +100,59 @@ class SignalEngine:
         if best is None:
             return None
 
+        # ── Sector ETF confirmation adjustment ───────────────────────────────
+        sector_adj = 0
+        if settings.signals.sector_confirmation_enabled and bars_dict:
+            sector_adj = sector_confidence_adjustment(
+                symbol=best.symbol,
+                direction=best.direction,
+                bars_dict=bars_dict,
+                lookback=settings.signals.sector_trend_bars,
+                bonus=settings.signals.sector_confirmation_bonus,
+                penalty=settings.signals.sector_confirmation_penalty,
+            )
+            if sector_adj != 0:
+                logger.info(
+                    "SignalEngine [%s]: sector adjustment %+d (ETF=%s, direction=%s)",
+                    best.symbol, sector_adj,
+                    get_sector_etf(best.symbol), best.direction,
+                )
+                best = SignalResult(
+                    symbol=best.symbol,
+                    signal_type=best.signal_type,
+                    direction=best.direction,
+                    entry_price=best.entry_price,
+                    target_price=best.target_price,
+                    stop_price=best.stop_price,
+                    confidence=min(max(best.confidence + sector_adj, 0), 100),
+                    estimated_hold_seconds=best.estimated_hold_seconds,
+                    timestamp=best.timestamp,
+                    metadata={
+                        **best.metadata,
+                        "sector_adjustment": sector_adj,
+                        "sector_etf": get_sector_etf(best.symbol),
+                    },
+                )
+                # Re-check threshold after sector penalty may have dropped confidence
+                if best.confidence < settings.signals.min_confidence_score:
+                    logger.debug(
+                        "SignalEngine [%s]: signal dropped below threshold after "
+                        "sector penalty (confidence=%d)",
+                        symbol, best.confidence,
+                    )
+                    return None
+
+        try:
+            regime_label = classify_regime(df).regime.value
+        except Exception:
+            regime_label = "unknown"
+
         logger.info(
-            "SignalEngine [%s]: %s %s | confidence=%d | entry=%.2f "
-            "target=%.2f stop=%.2f | R:R=1:%.2f",
+            "SignalEngine [%s]: %s %s | confidence=%d | regime=%s | sector_adj=%+d | "
+            "entry=%.2f target=%.2f stop=%.2f | R:R=1:%.2f",
             symbol, best.direction.upper(), best.signal_type,
-            best.confidence, best.entry_price,
-            best.target_price, best.stop_price,
+            best.confidence, regime_label, sector_adj,
+            best.entry_price, best.target_price, best.stop_price,
             best.reward / best.risk if best.risk > 0 else 0,
         )
         return best
@@ -139,7 +191,28 @@ class SignalEngine:
     ) -> List[SignalResult]:
         """Run every strategy and collect non-None results."""
         results: List[SignalResult] = []
+
+        # Classify regime once per tick — shared across all strategies
+        regime_result = None
+        try:
+            regime_result = classify_regime(df)
+        except Exception:
+            pass  # if regime check fails, allow all strategies through
+
         for strategy in self._strategies:
+            if strategy.name in settings.signals.disabled_signals:
+                continue
+
+            # Regime filter — suppress strategies inappropriate for current market
+            if regime_result is not None:
+                if not is_strategy_valid_for_regime(strategy.name, regime_result.regime):
+                    logger.debug(
+                        "SignalEngine [%s]: %s suppressed — regime=%s (score=%.2f)",
+                        symbol, strategy.name,
+                        regime_result.regime.value, regime_result.score,
+                    )
+                    continue
+
             try:
                 result = strategy.evaluate(df, symbol, current_price)
                 if result is not None:

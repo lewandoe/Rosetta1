@@ -407,6 +407,52 @@ class OrderManager:
         with self._lock:
             return len(self._open_trades)
 
+    def update_trade_exits(
+        self,
+        symbol: str,
+        new_target: float,
+        new_stop: float,
+    ) -> bool:
+        """
+        Update target_price and stop_price for the open trade in *symbol*.
+        Called when a duplicate signal arrives — instead of opening a new
+        position, the existing trade's exit levels are refreshed.
+
+        Returns True if a matching trade was found and updated, False otherwise.
+        """
+        with self._lock:
+            for trade in self._open_trades.values():
+                if trade.symbol == symbol:
+                    old_target = trade.target_price
+                    old_stop   = trade.stop_price
+                    trade.target_price = new_target
+                    trade.stop_price   = new_stop
+                    logger.info(
+                        "OrderManager UPDATE [%s]: target %.4f→%.4f stop %.4f→%.4f",
+                        symbol, old_target, new_target, old_stop, new_stop,
+                    )
+                    return True
+        return False
+
+    def exit_trade_by_symbol(self, symbol: str) -> bool:
+        """
+        Immediately close the open trade for *symbol* at market price.
+        Called when a signal reversal is detected — the signal engine has
+        flipped direction, so we exit the existing position and get flat.
+
+        Returns True if a trade was found and closed, False otherwise.
+        """
+        with self._lock:
+            trade = next(
+                (t for t in self._open_trades.values() if t.symbol == symbol),
+                None,
+            )
+        if trade is None:
+            return False
+        # _close_trade performs the atomic pop under lock before any network I/O
+        result = self._close_trade(trade, reason="signal_reversal")
+        return result is not None
+
     # ------------------------------------------------------------------
     # Internal close helpers
     # ------------------------------------------------------------------
