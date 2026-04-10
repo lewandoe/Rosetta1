@@ -45,11 +45,11 @@ class RiskSettings(BaseSettings):
     max_open_positions: int = Field(default=3, description="Max concurrent open positions")
 
     # Pattern-Day-Trader: max day trades per rolling 5-business-day window
-    max_day_trades: int = Field(default=500, description="PDT limit — day trades per rolling 5-day window")
+    max_day_trades: int = Field(default=3, description="PDT limit — day trades per rolling 5-day window")
 
     # EOD forced liquidation time (Eastern, 24-h)
     eod_liquidation_hour: int = Field(default=15, description="Force-close hour (ET)")
-    eod_liquidation_minute: int = Field(default=55, description="Force-close minute (ET)")
+    eod_liquidation_minute: int = Field(default=45, description="Force-close minute (ET)")
 
     # Slippage guard: cancel/flag if actual fill deviates more than this fraction
     max_slippage_pct: float = Field(default=0.0015, description="Max acceptable fill slippage (0.15%)")
@@ -69,7 +69,7 @@ class SignalSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # Only fire signals above this confidence threshold
-    min_confidence_score: int = Field(default=65, description="Minimum signal confidence (0–100)")
+    min_confidence_score: int = Field(default=70, description="Minimum signal confidence (0–100)")
 
     # EMA periods used by ema_cross strategy
     ema_fast: int = Field(default=8)
@@ -89,13 +89,6 @@ class SignalSettings(BaseSettings):
 
     # Opening Range Breakout: minutes after open that define the range
     orb_minutes: int = Field(default=15, description="ORB range window in minutes after open")
-
-    # Signal types to skip entirely — add names to disable without deleting code.
-    # Valid values: momentum, vwap_cross, ema_cross, orb, rsi
-    disabled_signals: list[str] = Field(
-        default=["momentum", "orb"],
-        description="Signal types to skip entirely. Valid values: momentum, vwap_cross, ema_cross, orb, rsi",
-    )
 
 
 class ExecutionSettings(BaseSettings):

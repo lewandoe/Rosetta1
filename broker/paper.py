@@ -85,32 +85,13 @@ class PaperBroker(BrokerInterface):
         full history, which is appropriate for order simulation.
         """
         try:
-            # Create a fresh Ticker each call — yfinance caches fast_info
-            # per object so reusing the same instance returns stale prices.
             ticker = yf.Ticker(symbol)
-            # Use download() for a guaranteed fresh single-bar price
-            import pandas as pd
-            df = yf.download(symbol, period="1d", interval="1m",
-                             progress=False, auto_adjust=True)
-            if df is not None and len(df) > 0:
-                # Extract scalar close price handling MultiIndex columns
-                if isinstance(df.columns, __import__("pandas").MultiIndex):
-                    close_series = df[("Close", symbol)]
-                else:
-                    close_series = df["Close"]
-                # Drop incomplete final bar if volume is 0
-                if isinstance(df.columns, __import__("pandas").MultiIndex):
-                    vol_series = df[("Volume", symbol)]
-                else:
-                    vol_series = df["Volume"]
-                if len(df) > 1 and float(vol_series.iloc[-1]) == 0:
-                    close_series = close_series.iloc[:-1]
-                last = float(close_series.iloc[-1])
-            else:
-                last = float(getattr(ticker.fast_info, "last_price", None) or getattr(ticker.fast_info, "previous_close", None) or 0)
-            bid = last * 0.9995   # fast_info has no bid attribute
-            ask = last * 1.0005   # fast_info has no ask attribute
-            volume = int(getattr(ticker.fast_info, "three_month_average_volume", None) or 0)
+            info = ticker.fast_info
+            # fast_info keys: last_price, bid, ask, three_month_average_volume
+            last = float(info.get("last_price") or info.get("previous_close", 0))
+            bid = float(info.get("bid") or last * 0.9995)
+            ask = float(info.get("ask") or last * 1.0005)
+            volume = int(info.get("three_month_average_volume") or 0)
             return Quote(
                 symbol=symbol,
                 bid=bid,
@@ -166,74 +147,43 @@ class PaperBroker(BrokerInterface):
         cost = fill_price * order.quantity
 
         if order.side == OrderSide.BUY:
+            if cost > self._cash:
+                raise InsufficientFundsError(
+                    f"Insufficient funds: need ${cost:.2f}, have ${self._cash:.2f}"
+                )
+            self._cash -= cost
             pos = self._positions.get(order.symbol)
-            if pos is not None and pos.quantity < 0:
-                # ── Cover a short position ───────────────────────────────────
-                self._cash -= cost
-                pos.quantity += order.quantity   # less negative (or flips to long)
-                pos.current_price = fill_price
-                if pos.quantity >= 0:
-                    self._day_trade_dates.append(datetime.now(ET))
-                    if pos.quantity == 0:
-                        del self._positions[order.symbol]
-                    else:
-                        # Over-covered: flipped to long — reset cost basis
-                        pos.avg_cost = fill_price
+            if pos is None:
+                self._positions[order.symbol] = Position(
+                    symbol=order.symbol,
+                    quantity=order.quantity,
+                    avg_cost=fill_price,
+                    current_price=fill_price,
+                )
             else:
-                # ── Open or add to a long position ───────────────────────────
-                if cost > self._cash:
-                    raise InsufficientFundsError(
-                        f"Insufficient funds: need ${cost:.2f}, have ${self._cash:.2f}"
-                    )
-                self._cash -= cost
-                if pos is None:
-                    self._positions[order.symbol] = Position(
-                        symbol=order.symbol,
-                        quantity=order.quantity,
-                        avg_cost=fill_price,
-                        current_price=fill_price,
-                    )
-                else:
-                    # Weighted average cost basis
-                    total_qty = pos.quantity + order.quantity
-                    pos.avg_cost = (
-                        (pos.avg_cost * pos.quantity + fill_price * order.quantity)
-                        / total_qty
-                    )
-                    pos.quantity = total_qty
-                    pos.current_price = fill_price
+                # Weighted average cost basis
+                total_qty = pos.quantity + order.quantity
+                pos.avg_cost = (
+                    (pos.avg_cost * pos.quantity + fill_price * order.quantity)
+                    / total_qty
+                )
+                pos.quantity = total_qty
+                pos.current_price = fill_price
 
         else:  # SELL
             pos = self._positions.get(order.symbol)
-            long_qty = pos.quantity if (pos and pos.quantity > 0) else 0
-            if long_qty >= order.quantity:
-                # ── Reduce or close an existing long ─────────────────────────
-                self._cash += fill_price * order.quantity
-                pos.quantity -= order.quantity
-                pos.current_price = fill_price
-                if pos.quantity == 0:
-                    self._day_trade_dates.append(datetime.now(ET))
-                    del self._positions[order.symbol]
-            else:
-                # ── Open or add to a short position ──────────────────────────
-                # Receive short-sale proceeds; short tracked as negative quantity.
-                self._cash += fill_price * order.quantity
-                short_open_qty = order.quantity - long_qty
-                if long_qty > 0:
-                    # Close the residual long first (counts as a day trade)
-                    self._day_trade_dates.append(datetime.now(ET))
-                existing_short = abs(pos.quantity) if (pos and pos.quantity < 0) else 0
-                total_short = existing_short + short_open_qty
-                new_avg = (
-                    (existing_short * (pos.avg_cost if pos else fill_price) +
-                     short_open_qty * fill_price) / total_short
+            if pos is None or pos.quantity < order.quantity:
+                raise BrokerError(
+                    f"Cannot sell {order.quantity} shares of {order.symbol}: "
+                    f"position is {pos.quantity if pos else 0}"
                 )
-                self._positions[order.symbol] = Position(
-                    symbol=order.symbol,
-                    quantity=-total_short,
-                    avg_cost=new_avg,
-                    current_price=fill_price,
-                )
+            self._cash += fill_price * order.quantity
+            pos.quantity -= order.quantity
+            pos.current_price = fill_price
+            if pos.quantity == 0:
+                # Track day trade: opening + closing the same symbol same day counts
+                self._day_trade_dates.append(datetime.now(ET))
+                del self._positions[order.symbol]
 
     # ------------------------------------------------------------------
     # BrokerInterface implementation

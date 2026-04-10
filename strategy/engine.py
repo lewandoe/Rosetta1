@@ -140,8 +140,6 @@ class SignalEngine:
         """Run every strategy and collect non-None results."""
         results: List[SignalResult] = []
         for strategy in self._strategies:
-            if strategy.name in settings.signals.disabled_signals:
-                continue
             try:
                 result = strategy.evaluate(df, symbol, current_price)
                 if result is not None:
