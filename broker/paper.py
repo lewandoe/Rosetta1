@@ -85,13 +85,14 @@ class PaperBroker(BrokerInterface):
         full history, which is appropriate for order simulation.
         """
         try:
-            ticker = yf.Ticker(symbol)
-            info = ticker.fast_info
-            # fast_info keys: last_price, bid, ask, three_month_average_volume
-            last = float(info.get("last_price") or info.get("previous_close", 0))
-            bid = float(info.get("bid") or last * 0.9995)
-            ask = float(info.get("ask") or last * 1.0005)
-            volume = int(info.get("three_month_average_volume") or 0)
+            info = yf.Ticker(symbol).fast_info
+            lp = getattr(info, "last_price", None)
+            pc = getattr(info, "previous_close", None)
+            op = getattr(info, "open", None)
+            last = float(lp if lp is not None else pc if pc is not None else op if op is not None else 0.0)
+            bid = last * 0.9995
+            ask = last * 1.0005
+            volume = int(getattr(info, "three_month_average_volume", None) or 0)
             return Quote(
                 symbol=symbol,
                 bid=bid,
@@ -172,18 +173,28 @@ class PaperBroker(BrokerInterface):
 
         else:  # SELL
             pos = self._positions.get(order.symbol)
-            if pos is None or pos.quantity < order.quantity:
-                raise BrokerError(
-                    f"Cannot sell {order.quantity} shares of {order.symbol}: "
-                    f"position is {pos.quantity if pos else 0}"
-                )
-            self._cash += fill_price * order.quantity
-            pos.quantity -= order.quantity
-            pos.current_price = fill_price
-            if pos.quantity == 0:
-                # Track day trade: opening + closing the same symbol same day counts
-                self._day_trade_dates.append(datetime.now(ET))
-                del self._positions[order.symbol]
+            if pos is not None and pos.quantity > 0:
+                # Closing an existing long position
+                self._cash += fill_price * order.quantity
+                pos.quantity -= order.quantity
+                pos.current_price = fill_price
+                if pos.quantity == 0:
+                    self._day_trade_dates.append(datetime.now(ET))
+                    del self._positions[order.symbol]
+            else:
+                # Opening a short position (negative quantity)
+                if pos is None:
+                    self._positions[order.symbol] = type('Position', (), {
+                        'symbol': order.symbol,
+                        'quantity': -order.quantity,
+                        'avg_cost': fill_price,
+                        'current_price': fill_price,
+                    })()
+                else:
+                    pos.quantity -= order.quantity
+                    pos.current_price = fill_price
+                # Credit cash (short proceeds)
+                self._cash += fill_price * order.quantity
 
     # ------------------------------------------------------------------
     # BrokerInterface implementation

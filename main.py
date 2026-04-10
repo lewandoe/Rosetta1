@@ -49,6 +49,7 @@ from broker.base import BrokerInterface, Quote
 from broker.paper import PaperBroker
 from config.settings import UNIVERSE, settings
 from data.feed import FeedManager
+from data.indicators import add_all
 from data.history import seed_bars, HistoryError
 from execution.order_manager import OrderManager
 from risk.guard import RiskGuard
@@ -158,7 +159,11 @@ class Rosetta1:
         logger.info("Seeding OHLCV bars…")
         for sym in self._symbols:
             try:
-                self._bars[sym] = seed_bars(sym)
+                raw = seed_bars(sym)
+                raw.columns = [c.lower() for c in raw.columns]
+                if len(raw) > 1 and raw['volume'].iloc[-1] == 0:
+                    raw = raw.iloc[:-1]
+                self._bars[sym] = add_all(raw)
                 logger.info("Seeded bars for %s (%d rows)", sym, len(self._bars[sym]))
             except HistoryError as exc:
                 logger.warning("Could not seed bars for %s: %s — skipping", sym, exc)

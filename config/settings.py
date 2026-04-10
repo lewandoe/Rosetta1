@@ -45,7 +45,7 @@ class RiskSettings(BaseSettings):
     max_open_positions: int = Field(default=3, description="Max concurrent open positions")
 
     # Pattern-Day-Trader: max day trades per rolling 5-business-day window
-    max_day_trades: int = Field(default=3, description="PDT limit — day trades per rolling 5-day window")
+    max_day_trades: int = Field(default=500, description="PDT limit — day trades per rolling 5-day window")
 
     # EOD forced liquidation time (Eastern, 24-h)
     eod_liquidation_hour: int = Field(default=15, description="Force-close hour (ET)")
