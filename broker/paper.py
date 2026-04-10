@@ -165,12 +165,21 @@ class PaperBroker(BrokerInterface):
             else:
                 # Weighted average cost basis
                 total_qty = pos.quantity + order.quantity
-                pos.avg_cost = (
-                    (pos.avg_cost * pos.quantity + fill_price * order.quantity)
-                    / total_qty
-                )
-                pos.quantity = total_qty
-                pos.current_price = fill_price
+                if total_qty == 0:
+                    # Covering a short position exactly — remove it
+                    self._day_trade_dates.append(datetime.now(ET))
+                    del self._positions[order.symbol]
+                elif pos.quantity < 0:
+                    # Partially covering a short position
+                    pos.quantity = total_qty
+                    pos.current_price = fill_price
+                else:
+                    pos.avg_cost = (
+                        (pos.avg_cost * pos.quantity + fill_price * order.quantity)
+                        / total_qty
+                    )
+                    pos.quantity = total_qty
+                    pos.current_price = fill_price
 
         else:  # SELL
             pos = self._positions.get(order.symbol)

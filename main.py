@@ -133,10 +133,13 @@ class Rosetta1:
         # ── Wire trade-closed callbacks ──────────────────────────────────────
         def _safe_log_trade(ct):
             try:
+                print(f"CALLBACK FIRED: {ct.symbol} {ct.direction} pnl={ct.gross_pnl:.2f}")
                 self._logger.log_trade(ct)
+                print(f"CALLBACK SUCCESS: {ct.symbol} written to DB")
             except Exception as exc:
                 import traceback
                 logger.error("TRADE LOG FAILED: %s\n%s", exc, traceback.format_exc())
+                print(f"CALLBACK FAILED: {exc}")
 
         self._om.on_trade_closed(_safe_log_trade)
 
