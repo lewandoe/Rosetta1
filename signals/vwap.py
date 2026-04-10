@@ -89,7 +89,7 @@ class VwapSignal(BaseSignal):
             return None
 
         # ── Volume filter ──────────────────────────────────────────────────
-        if vol <= vol_ma:
+        if vol <= vol_ma * 0.7:  # allow moderate volume (70% of avg)
             logger.debug("VwapSignal [%s]: blocked — volume below MA", symbol)
             return None
 

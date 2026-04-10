@@ -80,7 +80,7 @@ class RsiSignal(BaseSignal):
         direction = "long" if crossed_up else "short"
 
         # ── Volume filter ───────────────────────────────────────────────────
-        if vol <= vol_ma:
+        if vol <= vol_ma * 0.7:  # allow moderate volume (70% of avg)
             logger.debug("RsiSignal [%s]: blocked — volume below MA", symbol)
             return None
 
