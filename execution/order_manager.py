@@ -31,7 +31,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
 
 import pytz
@@ -517,7 +517,7 @@ class OrderManager:
         else:
             gross_pnl = (trade.entry_price - exit_price) * exit_qty
 
-        closed_at = datetime.utcnow()
+        closed_at = datetime.now(timezone.utc)
         ct = ClosedTrade(
             trade_id=trade.trade_id,
             symbol=trade.symbol,
