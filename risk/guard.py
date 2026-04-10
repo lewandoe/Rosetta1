@@ -163,14 +163,14 @@ class RiskGuard:
         # ── 2. Market hours ─────────────────────────────────────────────────
         if not is_market_open:
             return _reject("market_hours", "Market is closed")
-        # Also enforce EOD cutoff — no new entries after 3:45 PM ET
+        # No new entries after 3:55 PM ET — positions close at 3:59
         now_et = datetime.now(ET)
-        eod_h = settings.risk.eod_liquidation_hour
-        eod_m = settings.risk.eod_liquidation_minute
-        eod_cutoff = now_et.replace(hour=eod_h, minute=eod_m, second=0, microsecond=0)
-        if now_et >= eod_cutoff:
+        no_entry_h = settings.risk.eod_no_new_entries_hour
+        no_entry_m = settings.risk.eod_no_new_entries_minute
+        no_entry_cutoff = now_et.replace(hour=no_entry_h, minute=no_entry_m, second=0, microsecond=0)
+        if now_et >= no_entry_cutoff:
             return _reject("market_hours",
-                           f"Past EOD cutoff ({eod_h:02d}:{eod_m:02d} ET) — no new entries")
+                           f"Past no-new-entries cutoff ({no_entry_h:02d}:{no_entry_m:02d} ET)")
         passed.append("market_hours")
 
         # ── 3. Daily loss limit ─────────────────────────────────────────────

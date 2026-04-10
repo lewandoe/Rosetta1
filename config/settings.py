@@ -64,7 +64,10 @@ class RiskSettings(BaseSettings):
 
     # EOD forced liquidation time (Eastern, 24-h)
     eod_liquidation_hour: int = Field(default=15, description="Force-close hour (ET)")
-    eod_liquidation_minute: int = Field(default=45, description="Force-close minute (ET)")
+    eod_liquidation_minute: int = Field(default=59, description="Force-close minute (ET) — close all positions")
+    # Last time to open a new position (must be before liquidation)
+    eod_no_new_entries_hour: int = Field(default=15, description="No new entries hour (ET)")
+    eod_no_new_entries_minute: int = Field(default=55, description="No new entries minute (ET) — no new positions after this")
 
     # Slippage guard: cancel/flag if actual fill deviates more than this fraction
     max_slippage_pct: float = Field(default=0.0015, description="Max acceptable fill slippage (0.15%)")

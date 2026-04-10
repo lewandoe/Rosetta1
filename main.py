@@ -133,13 +133,10 @@ class Rosetta1:
         # ── Wire trade-closed callbacks ──────────────────────────────────────
         def _safe_log_trade(ct):
             try:
-                print(f"CALLBACK FIRED: {ct.symbol} {ct.direction} pnl={ct.gross_pnl:.2f}")
                 self._logger.log_trade(ct)
-                print(f"CALLBACK SUCCESS: {ct.symbol} written to DB")
             except Exception as exc:
                 import traceback
                 logger.error("TRADE LOG FAILED: %s\n%s", exc, traceback.format_exc())
-                print(f"CALLBACK FAILED: {exc}")
 
         self._om.on_trade_closed(_safe_log_trade)
 
@@ -261,17 +258,24 @@ class Rosetta1:
 
     def _check_eod(self) -> None:
         """
-        Trigger graceful shutdown once EOD liquidation + buffer has passed
-        and OrderManager has closed all positions.
+        1. At 3:59 ET — force-close all open positions.
+        2. At 4:00 ET — initiate shutdown once all positions are closed.
         """
         now_et = datetime.now(ET)
         eod_h = settings.risk.eod_liquidation_hour
         eod_m = settings.risk.eod_liquidation_minute
-        # Wait 5 minutes past EOD cutoff before shutting down main loop
-        eod = now_et.replace(
-            hour=eod_h, minute=eod_m + 5, second=0, microsecond=0
+
+        # Force-close all positions at 3:59 ET
+        force_close_time = now_et.replace(
+            hour=eod_h, minute=eod_m, second=0, microsecond=0
         )
-        if now_et >= eod and self._om.open_trade_count() == 0:
+        if now_et >= force_close_time and self._om.open_trade_count() > 0:
+            logger.warning("EOD 3:59 ET — force-closing all open positions")
+            self._om.force_close_all(reason="eod")
+
+        # Shutdown once past 4:00 ET and all positions closed
+        shutdown_time = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        if now_et >= shutdown_time and self._om.open_trade_count() == 0:
             logger.info("EOD + all positions closed — initiating shutdown")
             self._shutdown_requested = True
 
