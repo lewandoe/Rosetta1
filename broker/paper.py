@@ -23,6 +23,7 @@ from datetime import datetime
 from threading import Lock
 from typing import Dict, List, Optional
 
+import pandas as pd
 import pytz
 import yfinance as yf
 
@@ -203,6 +204,40 @@ class PaperBroker(BrokerInterface):
     def get_quote(self, symbol: str) -> Quote:
         self._validate_symbol(symbol)
         return self._fetch_quote_yf(symbol)
+
+    def get_quotes_batch(self, symbols: list[str]) -> dict[str, Quote]:
+        """
+        Fetch last prices for all symbols in a single yf.download() call
+        to avoid per-symbol API rate limits in the monitor loop.
+        """
+        if not symbols:
+            return {}
+        try:
+            df = yf.download(
+                symbols, period="1d", interval="1m",
+                progress=False, auto_adjust=True,
+            )
+            result: dict[str, Quote] = {}
+            for sym in symbols:
+                try:
+                    if isinstance(df.columns, pd.MultiIndex):
+                        price = float(df[("Close", sym)].dropna().iloc[-1])
+                    else:
+                        price = float(df["Close"].dropna().iloc[-1])
+                    result[sym] = Quote(
+                        symbol=sym,
+                        last=price,
+                        bid=price * 0.9995,
+                        ask=price * 1.0005,
+                        volume=0,
+                        timestamp=datetime.utcnow(),
+                    )
+                except Exception:
+                    pass  # omit this symbol; monitor will skip it
+            return result
+        except Exception as exc:
+            logger.warning("PaperBroker.get_quotes_batch failed: %s — falling back to per-symbol", exc)
+            return super().get_quotes_batch(symbols)
 
     def get_account(self) -> AccountInfo:
         with self._lock:

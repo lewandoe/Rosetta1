@@ -186,6 +186,13 @@ class RiskGuard:
                            f"{settings.risk.max_open_positions})")
         passed.append("max_positions")
 
+        # ── 4b. Duplicate symbol ─────────────────────────────────────────────
+        open_symbols = [p.symbol for p in open_positions]
+        if signal.symbol in open_symbols:
+            return _reject("duplicate_symbol",
+                           f"Already have open position in {signal.symbol}")
+        passed.append("duplicate_symbol")
+
         # ── 5. PDT limit ────────────────────────────────────────────────────
         # AccountInfo.day_trades_used counts trades in the rolling 5-day window.
         # We conservatively block at max_day_trades (not max_day_trades - 1) so

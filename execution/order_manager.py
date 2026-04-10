@@ -342,27 +342,31 @@ class OrderManager:
                 self._close_trade(trade, reason="eod")
             return
 
-        # ── Price checks ────────────────────────────────────────────────────
+        # ── Price checks — single batch quote fetch for all symbols ──────────
+        symbols = [t.symbol for t in trades]
+        quotes = self._broker.get_quotes_batch(symbols)
+
+        trades_to_close = []
         for trade in trades:
-            try:
-                quote = self._broker.get_quote(trade.symbol)
-                current = quote.last
-            except BrokerError as exc:
-                logger.warning(
-                    "OrderManager: quote failed for %s: %s", trade.symbol, exc
-                )
+            quote = quotes.get(trade.symbol)
+            if not quote:
+                logger.warning("OrderManager: no quote in batch for %s", trade.symbol)
                 continue
+            current = quote.last
 
             if trade.direction == "long":
                 if current >= trade.target_price:
-                    self._close_trade(trade, reason="target")
+                    trades_to_close.append((trade, "target"))
                 elif current <= trade.stop_price:
-                    self._close_trade(trade, reason="stop")
+                    trades_to_close.append((trade, "stop"))
             else:  # short
                 if current <= trade.target_price:
-                    self._close_trade(trade, reason="target")
+                    trades_to_close.append((trade, "target"))
                 elif current >= trade.stop_price:
-                    self._close_trade(trade, reason="stop")
+                    trades_to_close.append((trade, "stop"))
+
+        for trade, reason in trades_to_close:
+            self._close_trade(trade, reason=reason)
 
     # ------------------------------------------------------------------
     # EOD forced liquidation (also callable from main.py)
@@ -414,10 +418,12 @@ class OrderManager:
     ) -> Optional[ClosedTrade]:
         """
         Place a market close order and record the trade result.
-        Idempotent — if the trade is already removed, returns None.
+        Atomically removes the trade from open_trades first (under lock, before
+        any network I/O) so concurrent monitor ticks or force-close calls cannot
+        double-close the same position.
         """
         with self._lock:
-            if trade.trade_id not in self._open_trades:
+            if self._open_trades.pop(trade.trade_id, None) is None:
                 return None  # already closed by another path
 
         # Cancel any live broker-side stop order first to prevent double-close
@@ -483,9 +489,7 @@ class OrderManager:
             exit_reason=reason,
         )
 
-        # Remove from open trades
         with self._lock:
-            self._open_trades.pop(trade.trade_id, None)
             self._closed_trades.append(ct)
 
         # Record P&L with risk guard

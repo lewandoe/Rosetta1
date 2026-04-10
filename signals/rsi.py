@@ -150,7 +150,6 @@ class RsiSignal(BaseSignal):
 
         stop_price, target_price = self._stop_and_target(
             current_price, direction, atr_val,
-            stop_mult=0.8, target_mult=1.2,  # tighter on mean-reversion trades
         )
 
         return SignalResult(

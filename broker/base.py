@@ -274,6 +274,23 @@ class BrokerInterface(abc.ABC):
         weekdays only, no holiday logic unless the broker API provides it).
         """
 
+    def get_quotes_batch(self, symbols: list[str]) -> dict[str, "Quote"]:
+        """
+        Fetch quotes for multiple symbols.  Default implementation calls
+        get_quote() per symbol; override in concrete brokers to use a
+        batched API call and avoid per-symbol rate limits.
+
+        Returns a dict keyed by symbol.  Missing symbols are omitted (not
+        raised) so the caller can handle partial results gracefully.
+        """
+        result: dict[str, Quote] = {}
+        for sym in symbols:
+            try:
+                result[sym] = self.get_quote(sym)
+            except BrokerError:
+                pass
+        return result
+
 
 # ---------------------------------------------------------------------------
 # Exceptions

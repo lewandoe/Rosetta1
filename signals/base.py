@@ -14,6 +14,8 @@ from typing import Optional
 
 import pandas as pd
 
+from config.settings import settings
+
 
 @dataclass
 class SignalResult:
@@ -100,21 +102,21 @@ class BaseSignal(abc.ABC):
         entry: float,
         direction: str,
         atr: float,
-        stop_mult: float = 1.0,
-        target_mult: float = 1.5,
     ) -> tuple[float, float]:
         """
-        Compute stop_price and target_price from ATR multiples.
+        Compute stop_price and target_price using ATR-based sizing from settings.
 
-        Default R:R = 1:1.5 (risk 1 ATR, target 1.5 ATR).
-        Risk rule: loss ≤ 2× gain → 1.0 ≤ 2 × 1.5 = 3.0 ✓
+        stop_distance  = atr × settings.signals.stop_atr_multiplier
+        target_distance = stop_distance × settings.signals.reward_risk_ratio
 
         Returns:
             (stop_price, target_price)
         """
-        stop_dist = atr * stop_mult
-        target_dist = atr * target_mult
+        stop_distance = atr * settings.signals.stop_atr_multiplier
         if direction == "long":
-            return entry - stop_dist, entry + target_dist
+            stop_price   = entry - stop_distance
+            target_price = entry + (stop_distance * settings.signals.reward_risk_ratio)
         else:
-            return entry + stop_dist, entry - target_dist
+            stop_price   = entry + stop_distance
+            target_price = entry - (stop_distance * settings.signals.reward_risk_ratio)
+        return stop_price, target_price

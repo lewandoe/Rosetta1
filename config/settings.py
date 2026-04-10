@@ -42,7 +42,7 @@ class RiskSettings(BaseSettings):
     max_capital_per_trade_pct: float = Field(default=0.10, description="Max fraction of buying power per trade")
 
     # Maximum number of simultaneously open positions
-    max_open_positions: int = Field(default=3, description="Max concurrent open positions")
+    max_open_positions: int = Field(default=5, description="Max concurrent open positions")
 
     # Pattern-Day-Trader: max day trades per rolling 5-business-day window
     max_day_trades: int = Field(default=500, description="PDT limit — day trades per rolling 5-day window")
@@ -90,6 +90,20 @@ class SignalSettings(BaseSettings):
     # Opening Range Breakout: minutes after open that define the range
     orb_minutes: int = Field(default=15, description="ORB range window in minutes after open")
 
+    # ATR-based stop sizing
+    stop_atr_multiplier: float = Field(
+        default=3.0,
+        description="ATR multiplier for stop distance. "
+                    "3.0 = stop placed 3× ATR from entry. "
+                    "Higher = more room to breathe, larger losses when stopped.",
+    )
+    reward_risk_ratio: float = Field(
+        default=1.5,
+        description="Target distance as multiple of stop distance. "
+                    "1.5 = target is 1.5× further than stop. "
+                    "Higher = larger wins but lower win rate.",
+    )
+
 
 class ExecutionSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -130,7 +144,7 @@ class MonitoringSettings(BaseSettings):
     dashboard_refresh_seconds: float = Field(default=1.0)
 
     # SQLite database path for trade log
-    db_path: str = Field(default="trades.db")
+    db_path: str = Field(default="/Users/eric/Rosetta1/db/trades.db")
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +157,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     paper_starting_capital: float = Field(
-        default=10_000.0, description="Paper trading starting cash"
+        default=35000.0, description="Paper trading starting cash"
     )
 
     broker: BrokerSettings = Field(default_factory=BrokerSettings)
