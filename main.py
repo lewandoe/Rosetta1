@@ -47,7 +47,8 @@ from analytics.logger import TradeLogger
 from analytics.performance import compute
 from broker.base import BrokerInterface, Quote
 from broker.paper import PaperBroker
-from config.settings import UNIVERSE, settings
+from config.settings import settings
+from data.universe import get_universe
 from data.feed import FeedManager
 from data.indicators import add_all
 from data.history import seed_bars, HistoryError
@@ -113,7 +114,10 @@ class Rosetta1:
 
     def __init__(self, args: argparse.Namespace) -> None:
         self._args = args
-        self._symbols: List[str] = args.symbols or UNIVERSE
+        if args.symbols:
+            self._symbols = args.symbols
+        else:
+            self._symbols = get_universe()
         self._started_at = datetime.utcnow()
         self._shutdown_requested = False
 
@@ -292,19 +296,23 @@ class Rosetta1:
                 "Forcing close of %d open position(s)", self._om.open_trade_count()
             )
             self._om.force_close_all(reason="manual")
+        import time; time.sleep(1)  # let callbacks finish
 
         # Stop subsystems in reverse dependency order
         if self._dashboard:
             self._dashboard.stop()
         self._feed.stop()
-        self._om.stop()
-        self._logger.close()
 
-        # Print session summary
+        # Print session summary before closing logger
         today_trades = self._logger.get_today_trades()
         metrics = compute(today_trades)
         logger.info("Session complete | %s", metrics)
         _print_summary(metrics)
+
+        # Close logger then stop monitor last
+        self._logger.close()
+        self._om.stop()
+
 
 
 # ---------------------------------------------------------------------------

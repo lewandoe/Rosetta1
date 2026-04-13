@@ -6,26 +6,15 @@ All modules import from here. No magic numbers anywhere else in the codebase.
 
 from __future__ import annotations
 
-from typing import List
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 # ---------------------------------------------------------------------------
-# Target universe — trade ONLY these symbols
+# Target universe — built dynamically at startup via data/universe.py
+# Core symbols are always included; top 15 volume stocks are added daily.
+# Import: from data.universe import get_universe
 # ---------------------------------------------------------------------------
-UNIVERSE: List[str] = [
-    # Core ETFs
-    "SPY", "QQQ",
-    # Mega-cap tech
-    "TSLA", "NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "AMD",
-    # High volume semiconductors
-    "INTC", "MU", "MRVL", "AVGO", "SMCI",
-    # High volume growth/tech
-    "PLTR", "NFLX", "CRM", "COIN", "UBER",
-    # High volume financials/other
-    "SOFI", "HOOD", "BABA", "AAL", "T",
-]
 
 
 # ---------------------------------------------------------------------------

@@ -27,7 +27,8 @@ import pandas as pd
 import pytz
 import yfinance as yf
 
-from config.settings import UNIVERSE, settings
+from config.settings import settings
+from data.universe import get_universe
 from broker.base import (
     AccountInfo,
     BrokerError,
@@ -62,6 +63,7 @@ class PaperBroker(BrokerInterface):
             if starting_capital is not None
             else settings.paper_starting_capital
         )
+        self._universe: list[str] = get_universe()
         # symbol → Position
         self._positions: Dict[str, Position] = {}
         # order_id → OrderResult
@@ -109,9 +111,9 @@ class PaperBroker(BrokerInterface):
             ) from exc
 
     def _validate_symbol(self, symbol: str) -> None:
-        if symbol not in UNIVERSE:
+        if symbol not in self._universe:
             raise SymbolNotInUniverseError(
-                f"{symbol} is not in the trading universe: {UNIVERSE}"
+                f"{symbol} is not in the trading universe: {self._universe}"
             )
 
     def _simulate_fill(self, order: Order, quote: Quote) -> tuple[float, OrderStatus]:
