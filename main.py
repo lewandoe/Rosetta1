@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import time
@@ -192,6 +193,7 @@ class Rosetta1:
             while not self._shutdown_requested:
                 time.sleep(0.5)
                 self._check_eod()
+                self._check_shutdown_signal()
         except KeyboardInterrupt:
             logger.info("KeyboardInterrupt received — shutting down")
         finally:
@@ -282,6 +284,36 @@ class Rosetta1:
         if now_et >= shutdown_time and self._om.open_trade_count() == 0:
             logger.info("EOD + all positions closed — initiating shutdown")
             self._shutdown_requested = True
+
+    # ------------------------------------------------------------------
+    # Shutdown signal file
+    # ------------------------------------------------------------------
+
+    _SHUTDOWN_SIGNAL_FILE = "/tmp/rosetta1_shutdown"
+
+    def _check_shutdown_signal(self) -> None:
+        """
+        Check for the presence of /tmp/rosetta1_shutdown.
+
+        When found:
+          1. Remove the file (consume the signal).
+          2. Force-close all open positions.
+          3. Set shutdown_requested so the main loop exits cleanly.
+
+        Usage from a second terminal:
+            touch /tmp/rosetta1_shutdown
+            # or: bash scripts/stop.sh
+        """
+        if not os.path.exists(self._SHUTDOWN_SIGNAL_FILE):
+            return
+        try:
+            os.remove(self._SHUTDOWN_SIGNAL_FILE)
+        except OSError:
+            pass  # race with another process — still proceed
+        logger.info("Shutdown signal file detected — closing all positions")
+        if self._om.open_trade_count() > 0:
+            self._om.force_close_all(reason="manual")
+        self._shutdown_requested = True
 
     # ------------------------------------------------------------------
     # Shutdown
