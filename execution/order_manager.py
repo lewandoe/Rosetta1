@@ -78,6 +78,8 @@ class OpenTrade:
     signal: SignalResult
     # Broker-side stop order ID (live mode only)
     stop_order_id: Optional[str] = None
+    # Original stop distance at entry — used by trailing stop logic
+    initial_stop_distance: float = 0.0
 
 
 @dataclass
@@ -274,6 +276,7 @@ class OrderManager:
             entry_order_id=result.order_id,
             opened_at=datetime.utcnow(),
             signal=signal,
+            initial_stop_distance=abs(fill_price - signal.stop_price),
         )
 
         with self._lock:
@@ -354,6 +357,49 @@ class OrderManager:
                 continue
             current = quote.last
 
+            # ── Trailing stop ───────────────────────────────────────────────
+            stop_dist = trade.initial_stop_distance
+            if stop_dist > 0:
+                if trade.direction == "long":
+                    unrealized_r = (current - trade.entry_price) / stop_dist
+                    if unrealized_r >= 2.0:
+                        new_stop = trade.entry_price + (current - trade.entry_price) * 0.5
+                        if new_stop > trade.stop_price:
+                            old_stop = trade.stop_price
+                            trade.stop_price = new_stop
+                            logger.info(
+                                "OrderManager TRAIL [%s]: stop moved %.4f→%.4f (unrealized_r=%.2f)",
+                                trade.symbol, old_stop, trade.stop_price, unrealized_r,
+                            )
+                    elif unrealized_r >= 1.0:
+                        if trade.entry_price > trade.stop_price:
+                            old_stop = trade.stop_price
+                            trade.stop_price = trade.entry_price
+                            logger.info(
+                                "OrderManager TRAIL [%s]: stop moved %.4f→%.4f (unrealized_r=%.2f)",
+                                trade.symbol, old_stop, trade.stop_price, unrealized_r,
+                            )
+                else:  # short
+                    unrealized_r = (trade.entry_price - current) / stop_dist
+                    if unrealized_r >= 2.0:
+                        new_stop = trade.entry_price - (trade.entry_price - current) * 0.5
+                        if new_stop < trade.stop_price:
+                            old_stop = trade.stop_price
+                            trade.stop_price = new_stop
+                            logger.info(
+                                "OrderManager TRAIL [%s]: stop moved %.4f→%.4f (unrealized_r=%.2f)",
+                                trade.symbol, old_stop, trade.stop_price, unrealized_r,
+                            )
+                    elif unrealized_r >= 1.0:
+                        if trade.entry_price < trade.stop_price:
+                            old_stop = trade.stop_price
+                            trade.stop_price = trade.entry_price
+                            logger.info(
+                                "OrderManager TRAIL [%s]: stop moved %.4f→%.4f (unrealized_r=%.2f)",
+                                trade.symbol, old_stop, trade.stop_price, unrealized_r,
+                            )
+
+            # ── Target / stop exit checks ───────────────────────────────────
             if trade.direction == "long":
                 if current >= trade.target_price:
                     trades_to_close.append((trade, "target"))
