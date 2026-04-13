@@ -27,9 +27,7 @@ VOLUME_CANDIDATES: list[str] = [
     "NFLX", "CRM", "MSTR", "RIVN", "NIO", "SNAP", "BB", "GME",
     "LCID", "F", "BAC", "C", "WFC", "JPM", "GS", "MS",
     "XOM", "CVX", "DIS", "WMT", "COST", "TGT",
-    "ARM", "DELL", "HPE", "CRWD", "PANW", "CYBR",
-    "RBLX", "CLSK", "HUT", "RIOT", "MARA", "BITF",
-    "CCL", "RCL", "UAL", "DAL", "LUV",
+    "ARM", "DELL", "HPE", "CRWD", "PANW", "RBLX", "CLSK", "HUT", "RIOT", "MARA", "CCL", "RCL", "UAL", "DAL", "LUV",
 ]
 
 MIN_MARKET_CAP    = 500_000_000  # $500M

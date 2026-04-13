@@ -278,6 +278,7 @@ class Rosetta1:
         if now_et >= force_close_time and self._om.open_trade_count() > 0:
             logger.warning("EOD 3:59 ET — force-closing all open positions")
             self._om.force_close_all(reason="eod")
+            import time; time.sleep(2)  # let callbacks write to DB
 
         # Shutdown once past 4:00 ET and all positions closed
         shutdown_time = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
@@ -328,7 +329,7 @@ class Rosetta1:
                 "Forcing close of %d open position(s)", self._om.open_trade_count()
             )
             self._om.force_close_all(reason="manual")
-        import time; time.sleep(1)  # let callbacks finish
+        import time; time.sleep(2)  # let callbacks finish
 
         # Stop subsystems in reverse dependency order
         if self._dashboard:

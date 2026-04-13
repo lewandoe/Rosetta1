@@ -32,7 +32,7 @@ from datetime import datetime
 from typing import Callable, Dict, List, Optional
 
 from broker.base import BrokerInterface, BrokerError, Quote
-from config.settings import UNIVERSE, settings
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -76,11 +76,12 @@ class FeedManager:
     def __init__(
         self,
         broker: BrokerInterface,
-        symbols: List[str] = UNIVERSE,
+        symbols: List[str] | None = None,
         poll_interval: Optional[float] = None,
     ) -> None:
+        from data.universe import get_universe
         self._broker = broker
-        self._symbols = symbols
+        self._symbols = symbols if symbols is not None else get_universe()
         self._poll_interval: float = (
             poll_interval
             if poll_interval is not None

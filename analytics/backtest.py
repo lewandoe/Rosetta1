@@ -122,7 +122,7 @@ class BacktestEngine:
         Returns:
             BacktestResult with trades, metrics, and approval decision.
         """
-        from config.settings import UNIVERSE
+        from config.settings import settings
         syms = symbols or UNIVERSE
 
         end_dt   = datetime.utcnow().date()

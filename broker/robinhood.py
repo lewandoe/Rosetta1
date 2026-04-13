@@ -29,7 +29,7 @@ from typing import Optional
 import pytz
 import robin_stocks.robinhood as rh
 
-from config.settings import UNIVERSE, settings
+from config.settings import settings
 from broker.base import (
     AccountInfo,
     BrokerError,

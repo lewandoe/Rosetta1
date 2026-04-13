@@ -23,7 +23,7 @@ from typing import Optional
 import pandas as pd
 import yfinance as yf
 
-from config.settings import UNIVERSE, settings
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +62,7 @@ def fetch(
     Raises:
         HistoryError: if symbol invalid, fetch fails, or result is empty.
     """
-    if symbol not in UNIVERSE:
-        raise HistoryError(
-            f"{symbol} is not in the trading universe. Allowed: {UNIVERSE}"
-        )
+
 
     today = date.today()
     end_date = end or today
@@ -104,7 +101,7 @@ def fetch(
 
 
 def fetch_multi(
-    symbols: list[str] = UNIVERSE,
+    symbols: list[str] | None = None,
     days: int = 0,
     interval: str = "1m",
 ) -> dict[str, pd.DataFrame]:
@@ -115,6 +112,9 @@ def fetch_multi(
     check that all expected symbols are present.
     """
     result: dict[str, pd.DataFrame] = {}
+    if symbols is None:
+        from data.universe import get_universe
+        symbols = get_universe()
     for sym in symbols:
         try:
             result[sym] = fetch(sym, days=days, interval=interval)
