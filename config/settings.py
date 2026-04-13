@@ -15,20 +15,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Target universe — trade ONLY these symbols
 # ---------------------------------------------------------------------------
 UNIVERSE: List[str] = [
-    # Original Focus 10
-    "SPY", "TSLA", "NVDA", "AAPL", "MSFT",
-    "GOOGL", "AMZN", "META", "AMD", "QQQ",
-    # High volume additions (market cap > $500M)
-    "INTC",  # Intel — high volume semiconductor
-    "PLTR",  # Palantir — AI/data, very high retail volume
-    "NFLX",  # Netflix — mega-cap, high daily volume
-    "AVGO",  # Broadcom — semiconductor leader
-    "MU",    # Micron Technology — memory/AI chips
-    "MRVL",  # Marvell Technology — data infrastructure
-    "CRM",   # Salesforce — enterprise software
-    "COIN",  # Coinbase — crypto proxy, extreme volume
-    "BABA",  # Alibaba — high volume international
-    "UBER",  # Uber — high volume consumer tech
+    # Core ETFs
+    "SPY", "QQQ",
+    # Mega-cap tech
+    "TSLA", "NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "AMD",
+    # High volume semiconductors
+    "INTC", "MU", "MRVL", "AVGO", "SMCI",
+    # High volume growth/tech
+    "PLTR", "NFLX", "CRM", "COIN", "UBER",
+    # High volume financials/other
+    "SOFI", "HOOD", "BABA", "AAL", "T",
 ]
 
 
@@ -57,7 +53,7 @@ class RiskSettings(BaseSettings):
     max_capital_per_trade_pct: float = Field(default=0.10, description="Max fraction of buying power per trade")
 
     # Maximum number of simultaneously open positions
-    max_open_positions: int = Field(default=5, description="Max concurrent open positions")
+    max_open_positions: int = Field(default=10, description="Max concurrent open positions")
 
     # Pattern-Day-Trader: max day trades per rolling 5-business-day window
     max_day_trades: int = Field(default=500, description="PDT limit — day trades per rolling 5-day window")
