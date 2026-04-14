@@ -39,7 +39,7 @@ class RiskSettings(BaseSettings):
     max_daily_loss: float = Field(default=200.0, description="Max daily loss in USD before halt")
 
     # Capital allocation per trade as fraction of buying power (0–1)
-    max_capital_per_trade_pct: float = Field(default=0.10, description="Max fraction of buying power per trade")
+    max_capital_per_trade_pct: float = Field(default=0.15, description="Max fraction of buying power per trade")
 
     # Maximum number of simultaneously open positions
     max_open_positions: int = Field(default=10, description="Max concurrent open positions")

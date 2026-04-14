@@ -314,6 +314,7 @@ class Rosetta1:
         logger.info("Shutdown signal file detected — closing all positions")
         if self._om.open_trade_count() > 0:
             self._om.force_close_all(reason="manual")
+            import time; time.sleep(3)  # wait for callbacks to write to DB
         self._shutdown_requested = True
 
     # ------------------------------------------------------------------
