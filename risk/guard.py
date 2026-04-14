@@ -226,7 +226,7 @@ class RiskGuard:
         # Flat capital deployment: 5% of current buying power per trade.
         # The broker deducts deployed cash automatically, so buying_power
         # shrinks with each open position — no manual subtraction needed.
-        capital_per_trade = account.buying_power * settings.risk.max_capital_per_trade_pct
+        capital_per_trade = settings.paper_starting_capital * settings.risk.max_capital_per_trade_pct
         shares = max(
             settings.risk.min_shares,
             min(math.floor(capital_per_trade / entry_price), settings.risk.max_shares),
@@ -234,7 +234,7 @@ class RiskGuard:
         capital_used = shares * entry_price
 
         logger.info(
-            "RiskGuard capital check: buying_power=$%.2f, per_trade=$%.2f, shares=%d",
+            "RiskGuard capital check: buying_power=$%.2f, per_trade=$%.2f (fixed 5pct of 100k), shares=%d",
             account.buying_power, capital_per_trade, shares,
         )
 
