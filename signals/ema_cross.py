@@ -89,7 +89,7 @@ class EmaCrossSignal(BaseSignal):
             return None
 
         # ── Volume filter ──────────────────────────────────────────────────
-        if vol <= vol_ma * 0.7:  # allow moderate volume (70% of avg)
+        if vol <= vol_ma * 0.0:  # allow moderate volume (70% of avg)
             logger.debug("EmaCrossSignal [%s]: blocked — volume below MA", symbol)
             return None
 
