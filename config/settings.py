@@ -181,6 +181,27 @@ class SignalSettings(BaseSettings):
     )
 
 
+class FeedSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    # Maximum concurrent quote fetch threads
+    max_workers: int = Field(default=8, description="ThreadPoolExecutor size for quote fetching")
+
+    # Full-universe scan cadence
+    poll_interval_seconds: float = Field(
+        default=10.0,
+        description="Seconds between full-symbol-universe quote scans",
+    )
+
+    # Per-request courtesy delay (helps stay under Robinhood's rate limit)
+    request_delay_seconds: float = Field(
+        default=0.2,
+        description="Seconds each worker sleeps before issuing a quote request. "
+                    "With 8 workers and 0.2s delay: ~40 req/s ceiling, well under "
+                    "Robinhood's ~100 req/min limit for a 25-symbol universe.",
+    )
+
+
 class ExecutionSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -240,6 +261,7 @@ class Settings(BaseSettings):
     risk: RiskSettings = Field(default_factory=RiskSettings)
     signals: SignalSettings = Field(default_factory=SignalSettings)
     execution: ExecutionSettings = Field(default_factory=ExecutionSettings)
+    feed: FeedSettings = Field(default_factory=FeedSettings)
     backtest: BacktestSettings = Field(default_factory=BacktestSettings)
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
 

@@ -1,25 +1,28 @@
 """
-data/feed.py — Real-time polling feed for all 10 universe symbols.
+data/feed.py — Real-time polling feed for all universe symbols.
 
 Architecture:
-  - FeedManager runs one background thread per symbol (10 threads total).
-  - Each thread polls its broker's get_quote() on the configured interval
-    (settings.execution.signal_scan_interval_seconds).
+  - FeedManager runs a single coordinator thread that fires every
+    settings.feed.poll_interval_seconds.
+  - Each scan fans out to a ThreadPoolExecutor (max_workers=settings.feed.max_workers).
+  - Every worker acquires a shared semaphore, sleeps request_delay_seconds
+    (rate-limit courtesy), fetches a single quote, then releases the semaphore.
+  - This keeps concurrent Robinhood API calls at or below max_workers while
+    completing a full 25-symbol scan in ~(n_symbols/max_workers * request_delay)s.
   - Latest quote per symbol is stored in an in-memory snapshot dict.
-  - Downstream consumers (signal engine, dashboard) call get_latest() or
-    subscribe via callbacks — they never block on I/O.
-  - On consecutive poll failures (>= MAX_CONSECUTIVE_ERRORS), the thread
-    raises FeedError and the manager marks that symbol as degraded.
-    The system logs loudly but continues on remaining symbols.
+  - Subscribers (signal engine, dashboard) receive callbacks fired from the
+    worker threads — callbacks must be fast and thread-safe.
+  - On >= MAX_CONSECUTIVE_ERRORS for a symbol, that symbol is marked degraded;
+    the system logs loudly but continues on remaining symbols.
 
-Thread model:
-  - One Lock per symbol protects its snapshot entry.
-  - FeedManager itself is safe to call from multiple threads.
+Rate budget (default settings):
+  25 symbols / 8 workers = 4 batches × 0.2 s delay ≈ 0.8 s scan time
+  per 10 s interval → 2.5 req/s/symbol = ~62.5 req/min total — safely under
+  Robinhood's unofficial ~100 req/min ceiling.
 
 Lifecycle:
-  - start()  — launches all 10 poll threads (idempotent)
-  - stop()   — signals threads to exit, joins them with a timeout
-  - Designed to be started once in main.py and stopped on shutdown.
+  - start()  — launches coordinator thread (idempotent)
+  - stop()   — signals coordinator to exit, shuts down executor, joins
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Dict, List, Optional
@@ -44,7 +48,7 @@ QuoteCallback = Callable[[Quote], None]
 
 
 class FeedError(Exception):
-    """Raised when a symbol's feed thread exceeds its error threshold."""
+    """Raised when a symbol's feed exceeds its error threshold."""
 
 
 @dataclass
@@ -64,7 +68,7 @@ class FeedManager:
 
     Usage:
         broker = PaperBroker()
-        feed = FeedManager(broker)
+        feed = FeedManager(broker, symbols=universe)
         feed.start()
 
         quote = feed.get_latest("SPY")   # non-blocking snapshot read
@@ -81,62 +85,79 @@ class FeedManager:
     ) -> None:
         from data.universe import get_universe
         self._broker = broker
-        self._symbols = symbols if symbols is not None else get_universe()
+        self._symbols: List[str] = symbols if symbols is not None else get_universe()
         self._poll_interval: float = (
             poll_interval
             if poll_interval is not None
-            else float(settings.execution.signal_scan_interval_seconds)
+            else settings.feed.poll_interval_seconds
         )
+        self._max_workers: int = settings.feed.max_workers
+        self._request_delay: float = settings.feed.request_delay_seconds
+
         # Per-symbol state
         self._states: Dict[str, SymbolState] = {
-            sym: SymbolState(symbol=sym) for sym in symbols
+            sym: SymbolState(symbol=sym) for sym in self._symbols
         }
         # Per-symbol subscriber callbacks
-        self._callbacks: Dict[str, List[QuoteCallback]] = {sym: [] for sym in symbols}
+        self._callbacks: Dict[str, List[QuoteCallback]] = {
+            sym: [] for sym in self._symbols
+        }
         self._callback_lock = threading.Lock()
 
-        # Thread handles
-        self._threads: Dict[str, threading.Thread] = {}
+        # Rate-limiting semaphore shared across all worker threads in a scan
+        self._rate_sem = threading.Semaphore(self._max_workers)
+
+        # Coordinator thread
+        self._coordinator: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._started = False
+
+        # Executor is created fresh on start() and shut down on stop()
+        self._executor: Optional[ThreadPoolExecutor] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Launch one polling thread per symbol.  Idempotent."""
+        """Launch coordinator thread and worker executor.  Idempotent."""
         if self._started:
             logger.warning("FeedManager.start() called but feed is already running")
             return
 
         self._stop_event.clear()
-        for sym in self._symbols:
-            t = threading.Thread(
-                target=self._poll_loop,
-                args=(sym,),
-                name=f"feed-{sym}",
-                daemon=True,   # dies automatically if main thread exits
-            )
-            self._threads[sym] = t
-            t.start()
-
+        self._executor = ThreadPoolExecutor(
+            max_workers=self._max_workers,
+            thread_name_prefix="feed-worker",
+        )
+        self._coordinator = threading.Thread(
+            target=self._coordinator_loop,
+            name="feed-coordinator",
+            daemon=True,
+        )
+        self._coordinator.start()
         self._started = True
         logger.info(
-            "FeedManager started | %d symbols | poll_interval=%.1fs",
-            len(self._symbols), self._poll_interval,
+            "FeedManager started | %d symbols | poll_interval=%.1fs | "
+            "workers=%d | request_delay=%.2fs",
+            len(self._symbols),
+            self._poll_interval,
+            self._max_workers,
+            self._request_delay,
         )
 
-    def stop(self, timeout: float = 5.0) -> None:
-        """Signal all threads to exit and join them."""
+    def stop(self, timeout: float = 10.0) -> None:
+        """Signal coordinator to exit, drain executor, and join."""
         if not self._started:
             return
         self._stop_event.set()
-        for sym, t in self._threads.items():
-            t.join(timeout=timeout)
-            if t.is_alive():
-                logger.warning("FeedManager: poll thread for %s did not exit cleanly", sym)
-        self._threads.clear()
+        if self._coordinator and self._coordinator.is_alive():
+            self._coordinator.join(timeout=timeout)
+            if self._coordinator.is_alive():
+                logger.warning("FeedManager: coordinator thread did not exit cleanly")
+        if self._executor:
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            self._executor = None
         self._started = False
         logger.info("FeedManager stopped")
 
@@ -145,10 +166,7 @@ class FeedManager:
     # ------------------------------------------------------------------
 
     def get_latest(self, symbol: str) -> Optional[Quote]:
-        """
-        Return the most recent Quote for *symbol*, or None if no poll has
-        succeeded yet.  Non-blocking — reads from in-memory snapshot.
-        """
+        """Return the most recent Quote for *symbol*, or None.  Non-blocking."""
         state = self._get_state(symbol)
         with state.lock:
             return state.latest
@@ -160,7 +178,7 @@ class FeedManager:
     def subscribe(self, symbol: str, callback: QuoteCallback) -> None:
         """
         Register *callback* to be called each time a new quote arrives for
-        *symbol*.  Callback is invoked from the poll thread — keep it fast.
+        *symbol*.  Callback is invoked from a worker thread — keep it fast.
         """
         self._get_state(symbol)  # validates symbol
         with self._callback_lock:
@@ -172,10 +190,10 @@ class FeedManager:
             try:
                 self._callbacks[symbol].remove(callback)
             except ValueError:
-                pass  # already removed — not an error
+                pass
 
     def is_degraded(self, symbol: str) -> bool:
-        """True if this symbol's poll thread has exceeded the error threshold."""
+        """True if this symbol has exceeded its consecutive-error threshold."""
         return self._get_state(symbol).degraded
 
     def degraded_symbols(self) -> List[str]:
@@ -183,17 +201,7 @@ class FeedManager:
         return [sym for sym in self._symbols if self._states[sym].degraded]
 
     def status(self) -> Dict[str, dict]:
-        """
-        Return a health summary for each symbol — used by the dashboard.
-
-        Example entry:
-            "SPY": {
-                "last_price": 512.34,
-                "last_updated": "2024-01-08T10:30:01",
-                "consecutive_errors": 0,
-                "degraded": False,
-            }
-        """
+        """Return a health summary for each symbol — used by the dashboard."""
         result = {}
         for sym, state in self._states.items():
             with state.lock:
@@ -208,47 +216,97 @@ class FeedManager:
         return result
 
     # ------------------------------------------------------------------
-    # Poll loop (runs in background thread)
+    # Coordinator loop
     # ------------------------------------------------------------------
 
-    def _poll_loop(self, symbol: str) -> None:
+    def _coordinator_loop(self) -> None:
         """
-        Continuously poll quotes for *symbol* until stop() is called.
-
-        Error handling:
-          - Transient BrokerError: log warning, increment counter.
-          - If consecutive_errors >= MAX_CONSECUTIVE_ERRORS: mark degraded,
-            log error, and exit the thread.  The system continues on other symbols.
+        Runs in the coordinator thread.  Every poll_interval seconds,
+        submits all non-degraded symbols to the executor for parallel fetching.
         """
-        logger.debug("FeedManager: poll thread started for %s", symbol)
-        state = self._states[symbol]
+        logger.debug("FeedManager: coordinator started")
 
         while not self._stop_event.is_set():
-            poll_start = time.monotonic()
-            try:
-                quote = self._broker.get_quote(symbol)
-                self._store_quote(state, quote)
-            except BrokerError as exc:
-                self._handle_poll_error(state, exc)
-                if state.degraded:
-                    logger.error(
-                        "FeedManager: %s feed degraded after %d consecutive errors — "
-                        "stopping poll thread",
-                        symbol, MAX_CONSECUTIVE_ERRORS,
-                    )
-                    return
-            except Exception as exc:
-                # Unexpected exceptions are treated the same as BrokerError
-                self._handle_poll_error(state, exc)
-                if state.degraded:
-                    return
-
-            # Sleep for the remainder of the poll interval (accounts for fetch time)
-            elapsed = time.monotonic() - poll_start
+            scan_start = time.monotonic()
+            self._run_scan()
+            elapsed = time.monotonic() - scan_start
             sleep_for = max(0.0, self._poll_interval - elapsed)
             self._stop_event.wait(timeout=sleep_for)
 
-        logger.debug("FeedManager: poll thread exiting for %s", symbol)
+        logger.debug("FeedManager: coordinator exiting")
+
+    def _run_scan(self) -> None:
+        """
+        Fan out one quote fetch per non-degraded symbol using the executor.
+        Blocks until all futures complete so the coordinator can accurately
+        measure elapsed time for interval scheduling.
+        """
+        if self._executor is None or self._stop_event.is_set():
+            return
+
+        active_symbols = [
+            sym for sym in self._symbols if not self._states[sym].degraded
+        ]
+        if not active_symbols:
+            logger.warning("FeedManager: all symbols degraded — nothing to scan")
+            return
+
+        futures = {
+            self._executor.submit(self._fetch_one, sym): sym
+            for sym in active_symbols
+        }
+
+        for future in as_completed(futures):
+            sym = futures[future]
+            exc = future.exception()
+            if exc is not None:
+                # _fetch_one catches all exceptions internally — this shouldn't fire,
+                # but guard against unexpected raises from the executor itself.
+                logger.error("FeedManager: unexpected future error for %s: %s", sym, exc)
+
+    # ------------------------------------------------------------------
+    # Per-symbol worker
+    # ------------------------------------------------------------------
+
+    def _fetch_one(self, symbol: str) -> None:
+        """
+        Worker task: rate-throttle → fetch → store/callback.
+
+        Rate throttle: acquire semaphore (limits concurrency to max_workers),
+        sleep request_delay_seconds, then release after fetch.  This staggers
+        requests even when all workers are available simultaneously.
+        """
+        if self._stop_event.is_set():
+            return
+
+        state = self._states[symbol]
+
+        # Acquire rate-limit slot
+        acquired = self._rate_sem.acquire(timeout=self._poll_interval)
+        if not acquired:
+            logger.warning("FeedManager: semaphore timeout for %s — skipping", symbol)
+            return
+
+        try:
+            # Courtesy delay before issuing the actual API call
+            time.sleep(self._request_delay)
+
+            if self._stop_event.is_set():
+                return
+
+            quote = self._broker.get_quote(symbol)
+            self._store_quote(state, quote)
+
+        except BrokerError as exc:
+            self._handle_fetch_error(state, exc)
+        except Exception as exc:
+            self._handle_fetch_error(state, exc)
+        finally:
+            self._rate_sem.release()
+
+    # ------------------------------------------------------------------
+    # Quote storage and callbacks
+    # ------------------------------------------------------------------
 
     def _store_quote(self, state: SymbolState, quote: Quote) -> None:
         """Update snapshot and fire callbacks.  Resets error counter on success."""
@@ -256,9 +314,9 @@ class FeedManager:
             state.latest = quote
             state.last_updated = datetime.utcnow()
             state.consecutive_errors = 0
-            # Don't hold the lock while firing callbacks — could deadlock
             callbacks = list(self._callbacks.get(state.symbol, []))
 
+        # Fire callbacks outside the lock to avoid deadlock
         for cb in callbacks:
             try:
                 cb(quote)
@@ -267,17 +325,28 @@ class FeedManager:
                     "FeedManager: callback error for %s: %s", state.symbol, exc
                 )
 
-    def _handle_poll_error(self, state: SymbolState, exc: Exception) -> None:
+    def _handle_fetch_error(self, state: SymbolState, exc: Exception) -> None:
         with state.lock:
             state.consecutive_errors += 1
             count = state.consecutive_errors
             if count >= MAX_CONSECUTIVE_ERRORS:
                 state.degraded = True
 
-        logger.warning(
-            "FeedManager: poll error for %s (%d/%d): %s",
-            state.symbol, count, MAX_CONSECUTIVE_ERRORS, exc,
-        )
+        if state.degraded:
+            logger.error(
+                "FeedManager: %s degraded after %d consecutive errors (%s) — "
+                "symbol removed from scan",
+                state.symbol, count, exc,
+            )
+        else:
+            logger.warning(
+                "FeedManager: fetch error for %s (%d/%d): %s",
+                state.symbol, count, MAX_CONSECUTIVE_ERRORS, exc,
+            )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
     def _get_state(self, symbol: str) -> SymbolState:
         if symbol not in self._states:

@@ -120,7 +120,7 @@ class RobinhoodBroker(BrokerInterface):
             raise BrokerError("RobinhoodBroker is not authenticated")
 
     # ------------------------------------------------------------------
-    # Retry wrapper
+    # Retry wrappers
     # ------------------------------------------------------------------
 
     def _with_retry(self, fn, *args, **kwargs):
@@ -146,15 +146,64 @@ class RobinhoodBroker(BrokerInterface):
                 )
                 time.sleep(wait)
 
+    @staticmethod
+    def _is_rate_limited(exc: Exception) -> bool:
+        """Return True if *exc* looks like an HTTP 429 rate-limit response."""
+        msg = str(exc).lower()
+        return "429" in msg or "too many requests" in msg or "rate limit" in msg
+
+    def _with_retry_rate_aware(self, fn, *args, **kwargs):
+        """
+        Like _with_retry but applies a longer pause on HTTP 429.
+
+        Retry schedule:
+          - 429 (rate limited): 1 s, 2 s, 4 s  (exponential, no further retries)
+          - Other transient error: standard 1s/2s/4s back-off
+        """
+        max_retries = settings.execution.max_order_retries
+        for attempt in range(1, max_retries + 1):
+            try:
+                return fn(*args, **kwargs)
+            except BrokerError:
+                raise
+            except Exception as exc:
+                if attempt == max_retries:
+                    raise BrokerError(
+                        f"API call failed after {max_retries} attempts: {exc}"
+                    ) from exc
+                if self._is_rate_limited(exc):
+                    # Rate-limited: back off more aggressively
+                    wait = 2 ** attempt  # 2s, 4s, 8s
+                    logger.warning(
+                        "RobinhoodBroker: rate-limited (429) on attempt %d/%d — "
+                        "backing off %ds before retry",
+                        attempt, max_retries, wait,
+                    )
+                else:
+                    wait = 2 ** (attempt - 1)  # 1s, 2s, 4s
+                    logger.warning(
+                        "RobinhoodBroker: attempt %d/%d failed (%s), retrying in %ds",
+                        attempt, max_retries, exc, wait,
+                    )
+                time.sleep(wait)
+
     # ------------------------------------------------------------------
     # Validation helpers
     # ------------------------------------------------------------------
 
     def _validate_symbol(self, symbol: str) -> None:
-        if symbol not in UNIVERSE:
-            raise SymbolNotInUniverseError(
-                f"{symbol} is not in the trading universe: {UNIVERSE}"
-            )
+        # Universe is dynamic — validation is best-effort; skip if not loaded yet
+        try:
+            from data.universe import get_universe
+            universe = get_universe()
+            if symbol not in universe:
+                raise SymbolNotInUniverseError(
+                    f"{symbol} is not in the trading universe"
+                )
+        except SymbolNotInUniverseError:
+            raise
+        except Exception:
+            pass  # unable to load universe — allow the quote request through
 
     # ------------------------------------------------------------------
     # Market data
@@ -184,7 +233,8 @@ class RobinhoodBroker(BrokerInterface):
                 timestamp=datetime.utcnow(),
             )
 
-        return self._with_retry(_fetch)
+        # Use rate-aware retry so HTTP 429 responses get a longer back-off
+        return self._with_retry_rate_aware(_fetch)
 
     # ------------------------------------------------------------------
     # Account
