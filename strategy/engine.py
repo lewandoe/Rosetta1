@@ -64,17 +64,10 @@ def _get_macro_bias(bars_dict: dict) -> str | None:
         from data.indicators import latest
         spy_price = latest(spy_bars, "close")
         spy_vwap = latest(spy_bars, "vwap")
-        spy_close_n = float(spy_bars["close"].iloc[-(settings.signals.macro_bias_bars + 1)])
-        
-        above_vwap = spy_price > spy_vwap
-        trending_up = spy_price > spy_close_n
-        
-        if above_vwap and trending_up:
-            return "long"
-        elif not above_vwap and not trending_up:
-            return "short"
-        else:
-            return None  # mixed — allow both
+
+        # VWAP position is the sole arbiter of bias.
+        # Returns None only when data is unavailable (handled above).
+        return "long" if spy_price > spy_vwap else "short"
     except Exception:
         return None
 

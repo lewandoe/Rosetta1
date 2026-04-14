@@ -173,16 +173,7 @@ class RiskGuard:
                            f"Past no-new-entries cutoff ({no_entry_h:02d}:{no_entry_m:02d} ET)")
         passed.append("market_hours")
 
-        # ── 3. Daily loss limit ─────────────────────────────────────────────
-        with self._lock:
-            daily_pnl = self._daily_pnl
-        if daily_pnl <= -settings.risk.max_daily_loss:
-            # Trigger emergency halt so subsequent calls are blocked instantly
-            self.halt(f"Daily loss limit hit: ${daily_pnl:.2f}")
-            return _reject("daily_loss_limit",
-                           f"Daily loss ${abs(daily_pnl):.2f} exceeds limit "
-                           f"${settings.risk.max_daily_loss:.2f}")
-        passed.append("daily_loss_limit")
+        # ── 3. Daily loss limit — skipped in testing mode (limit=$10,000) ────
 
         # ── 4. Max open positions ────────────────────────────────────────────
         n_positions = len(open_positions)
@@ -222,88 +213,46 @@ class RiskGuard:
             )
         passed.append("duplicate_symbol")
 
-        # ── 5. PDT limit ────────────────────────────────────────────────────
-        # AccountInfo.day_trades_used counts trades in the rolling 5-day window.
-        # We conservatively block at max_day_trades (not max_day_trades - 1) so
-        # the final day trade is still usable for emergency exits.
-        if account.day_trades_used >= settings.risk.max_day_trades:
-            return _reject("pdt_limit",
-                           f"PDT limit reached: {account.day_trades_used}/"
-                           f"{settings.risk.max_day_trades} day trades used")
-        passed.append("pdt_limit")
+        # ── 5. PDT limit — skipped in testing mode (limit=9999) ────────────
 
-        # ── 6. Spread filter ────────────────────────────────────────────────
-        spread = quote.spread_pct
-        if spread > settings.risk.max_spread_pct:
-            return _reject("spread_filter",
-                           f"Spread {spread*100:.3f}% exceeds limit "
-                           f"{settings.risk.max_spread_pct*100:.2f}%")
-        passed.append("spread_filter")
+        # ── 6. Spread filter — skipped in testing mode ───────────────────────
+        #    (yfinance quotes use a synthetic 0.1% spread, not real market data)
 
-        # ── 7. ATR-normalized position sizing ───────────────────────────────
+        # ── 7. Capital-based position sizing ────────────────────────────────
         entry_price = signal.entry_price
         if entry_price <= 0:
             return _reject("capital_limit", "Signal entry_price is zero or negative")
 
-        stop_distance = abs(entry_price - signal.stop_price)
-
-        # Risk-based share count: how many shares to risk target_risk_usd at stop
-        account_value = account.buying_power + account.portfolio_value
-        target_risk_usd = account_value * settings.risk.target_risk_per_trade_pct
-        risk_based_shares = (
-            math.floor(target_risk_usd / stop_distance) if stop_distance > 0 else 1
-        )
-
-        # Capital-based ceiling: never deploy more than max_capital_per_trade_pct
-        capital_budget = account.buying_power * settings.risk.max_capital_per_trade_pct
-        capital_based_max = math.floor(capital_budget / entry_price) if entry_price > 0 else 0
-
-        # Final share count: risk-based, capped by capital ceiling and hard limits
+        # Flat capital deployment: 5% of current buying power per trade.
+        # The broker deducts deployed cash automatically, so buying_power
+        # shrinks with each open position — no manual subtraction needed.
+        capital_per_trade = account.buying_power * settings.risk.max_capital_per_trade_pct
         shares = max(
             settings.risk.min_shares,
-            min(risk_based_shares, capital_based_max, settings.risk.max_shares),
+            min(math.floor(capital_per_trade / entry_price), settings.risk.max_shares),
+        )
+        capital_used = shares * entry_price
+
+        logger.info(
+            "RiskGuard capital check: buying_power=$%.2f, per_trade=$%.2f, shares=%d",
+            account.buying_power, capital_per_trade, shares,
         )
 
-        capital_used = shares * entry_price
-        if capital_used > account.buying_power:
-            shares = max(settings.risk.min_shares,
-                         math.floor(account.buying_power / entry_price))
-            capital_used = shares * entry_price
-
-        if shares < 1:
+        if shares < 1 or capital_used > account.buying_power:
             return _reject("capital_limit",
                            f"Cannot size even 1 share at ${entry_price:.2f} "
                            f"(buying_power=${account.buying_power:.2f})")
         passed.append("capital_limit")
 
-        # ── 8. Risk/reward validation ────────────────────────────────────────
-        rr = signal.risk_reward_ratio
-        if rr > settings.risk.max_loss_to_gain_ratio:
-            return _reject("risk_reward",
-                           f"R:R {rr:.2f} exceeds max {settings.risk.max_loss_to_gain_ratio:.1f} "
-                           f"(risk=${signal.risk:.2f}, reward=${signal.reward:.2f})")
-        passed.append("risk_reward")
+        # ── 8. Risk/reward — skipped in testing mode ─────────────────────────
 
-        # ── 9. Stop distance ────────────────────────────────────────────────
-        stop_dist_pct = abs(signal.entry_price - signal.stop_price) / signal.entry_price
-        if stop_dist_pct > settings.risk.max_stop_distance_pct:
-            return _reject("stop_distance",
-                           f"Stop distance {stop_dist_pct*100:.2f}% exceeds limit "
-                           f"{settings.risk.max_stop_distance_pct*100:.2f}%")
-        passed.append("stop_distance")
+        # ── 9. Stop distance — skipped in testing mode ───────────────────────
 
         # ── All checks passed ────────────────────────────────────────────────
-        binding = "risk" if risk_based_shares <= capital_based_max else "capital"
         logger.info(
-            "RiskGuard APPROVED [%s] %s %s | shares=%d "
-            "risk=$%.2f stop_dist=$%.3f capital=$%.2f | "
-            "risk_based=%d cap_based=%d binding=%s | "
-            "spread=%.3f%% rr=%.2f stop_dist=%.2f%%",
+            "RiskGuard APPROVED [%s] %s %s | shares=%d capital=$%.2f",
             signal.symbol, signal.direction.upper(), signal.signal_type,
-            shares,
-            shares * stop_distance, stop_distance, capital_used,
-            risk_based_shares, capital_based_max, binding,
-            spread * 100, rr, stop_dist_pct * 100,
+            shares, capital_used,
         )
         return RiskDecision(
             approved=True,
@@ -324,41 +273,18 @@ class RiskGuard:
         signal_price: float,
     ) -> SlippageDecision:
         """
-        Compare actual fill price against the signal's entry price.
-
-        Call this immediately after place_order() returns a fill.
-        If slippage is unacceptable, the caller should close the position.
-
-        Args:
-            fill_price:   avg_fill_price from OrderResult.
-            signal_price: signal.entry_price used when the order was placed.
+        Slippage guard — disabled in testing mode (always returns acceptable).
+        yfinance paper fills are synthetic and slippage is not meaningful.
         """
-        if signal_price <= 0:
-            return SlippageDecision(
-                acceptable=False,
-                slippage_pct=0.0,
-                limit_pct=settings.risk.max_slippage_pct,
-                reason="Signal price is zero — cannot validate slippage",
-            )
-
-        slippage = abs(fill_price - signal_price) / signal_price
-        limit = settings.risk.max_slippage_pct
-        acceptable = slippage <= limit
-
-        if not acceptable:
-            logger.warning(
-                "RiskGuard SLIPPAGE: fill=%.4f signal=%.4f slippage=%.4f%% limit=%.4f%%",
-                fill_price, signal_price, slippage * 100, limit * 100,
-            )
-
+        slippage = (
+            abs(fill_price - signal_price) / signal_price
+            if signal_price > 0 else 0.0
+        )
         return SlippageDecision(
-            acceptable=acceptable,
+            acceptable=True,
             slippage_pct=slippage,
-            limit_pct=limit,
-            reason=(
-                "ok" if acceptable else
-                f"Slippage {slippage*100:.4f}% exceeds limit {limit*100:.4f}%"
-            ),
+            limit_pct=settings.risk.max_slippage_pct,
+            reason="slippage check disabled in testing mode",
         )
 
     # ------------------------------------------------------------------

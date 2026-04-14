@@ -274,7 +274,7 @@ class OrderManager:
             signal_type=signal.signal_type,
             confidence=signal.confidence,
             entry_order_id=result.order_id,
-            opened_at=datetime.utcnow(),
+            opened_at=datetime.now(timezone.utc),
             signal=signal,
             initial_stop_distance=abs(fill_price - signal.stop_price),
         )

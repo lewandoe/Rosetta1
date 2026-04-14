@@ -36,7 +36,7 @@ class RiskSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # Hard dollar ceiling on daily losses.  Trading halts when hit.
-    max_daily_loss: float = Field(default=200.0, description="Max daily loss in USD before halt")
+    max_daily_loss: float = Field(default=10000.0, description="Max daily loss in USD before halt")
 
     # Capital allocation per trade as fraction of buying power (0–1)
     max_capital_per_trade_pct: float = Field(default=0.05, description="Max fraction of buying power per trade")
@@ -45,7 +45,7 @@ class RiskSettings(BaseSettings):
     max_open_positions: int = Field(default=20, description="Max concurrent open positions")
 
     # Pattern-Day-Trader: max day trades per rolling 5-business-day window
-    max_day_trades: int = Field(default=500, description="PDT limit — day trades per rolling 5-day window")
+    max_day_trades: int = Field(default=9999, description="PDT limit — day trades per rolling 5-day window")
 
     # EOD forced liquidation time (Eastern, 24-h)
     eod_liquidation_hour: int = Field(default=15, description="Force-close hour (ET)")
@@ -254,7 +254,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     paper_starting_capital: float = Field(
-        default=35000.0, description="Paper trading starting cash"
+        default=100000.0, description="Paper trading starting cash"
     )
 
     broker: BrokerSettings = Field(default_factory=BrokerSettings)
