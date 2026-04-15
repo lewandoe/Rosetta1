@@ -107,6 +107,11 @@ class FeedManager:
         # Rate-limiting semaphore shared across all worker threads in a scan
         self._rate_sem = threading.Semaphore(self._max_workers)
 
+        # Per-symbol cooldown: epoch time after which the symbol may be retried.
+        # Set to now+60 when a symbol hits MAX_CONSECUTIVE_ERRORS; cleared on
+        # first successful fetch so degradation is temporary, not permanent.
+        self._degraded_until: Dict[str, float] = {}
+
         # Coordinator thread
         self._coordinator: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -244,11 +249,17 @@ class FeedManager:
         if self._executor is None or self._stop_event.is_set():
             return
 
+        now = time.time()
         active_symbols = [
-            sym for sym in self._symbols if not self._states[sym].degraded
+            sym for sym in self._symbols
+            if self._degraded_until.get(sym, 0) <= now
         ]
         if not active_symbols:
-            logger.warning("FeedManager: all symbols degraded — nothing to scan")
+            next_retry = min(self._degraded_until.values(), default=0)
+            wait = max(0.0, next_retry - now)
+            logger.warning(
+                "FeedManager: all symbols in cooldown — earliest retry in %.0fs", wait
+            )
             return
 
         futures = {
@@ -278,6 +289,10 @@ class FeedManager:
         """
         if self._stop_event.is_set():
             return
+
+        # Belt-and-suspenders cooldown check (race between _run_scan and now)
+        if self._degraded_until.get(symbol, 0) > time.time():
+            return  # still in 60s cooldown — _run_scan will reinclude after expiry
 
         state = self._states[symbol]
 
@@ -314,7 +329,10 @@ class FeedManager:
             state.latest = quote
             state.last_updated = datetime.utcnow()
             state.consecutive_errors = 0
+            state.degraded = False  # clear degraded flag — symbol is healthy again
             callbacks = list(self._callbacks.get(state.symbol, []))
+        # Clear cooldown outside the lock (dict op is GIL-safe)
+        self._degraded_until.pop(state.symbol, None)
 
         # Fire callbacks outside the lock to avoid deadlock
         for cb in callbacks:
@@ -333,9 +351,11 @@ class FeedManager:
                 state.degraded = True
 
         if state.degraded:
+            cooldown_until = time.time() + 60
+            self._degraded_until[state.symbol] = cooldown_until
             logger.error(
                 "FeedManager: %s degraded after %d consecutive errors (%s) — "
-                "symbol removed from scan",
+                "pausing for 60s then retrying",
                 state.symbol, count, exc,
             )
         else:

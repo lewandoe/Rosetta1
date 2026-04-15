@@ -298,6 +298,34 @@ class OrderManager:
         return trade
 
     # ------------------------------------------------------------------
+    # Per-signal exit helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _max_hold_seconds(signal_type: str) -> int:
+        """Return the maximum hold duration for a signal type before time exit."""
+        mapping = {
+            "momentum":     settings.execution.momentum_max_hold_seconds,
+            "ema_cross":    settings.execution.ema_cross_max_hold_seconds,
+            "vwap_cross":   settings.execution.vwap_cross_max_hold_seconds,
+            "rsi_reversal": settings.execution.rsi_reversal_max_hold_seconds,
+            "orb":          settings.execution.orb_max_hold_seconds,
+        }
+        return mapping.get(signal_type, settings.execution.momentum_max_hold_seconds)
+
+    @staticmethod
+    def _breakeven_r(signal_type: str) -> float:
+        """Return the R multiple at which the trailing stop moves to breakeven."""
+        mapping = {
+            "momentum":     settings.signals.momentum_breakeven_r,
+            "ema_cross":    settings.signals.ema_cross_breakeven_r,
+            "vwap_cross":   settings.signals.vwap_cross_breakeven_r,
+            "rsi_reversal": settings.signals.rsi_reversal_breakeven_r,
+            "orb":          settings.signals.orb_breakeven_r,
+        }
+        return mapping.get(signal_type, 1.0)
+
+    # ------------------------------------------------------------------
     # Position monitor loop
     # ------------------------------------------------------------------
 
@@ -357,8 +385,20 @@ class OrderManager:
                 continue
             current = quote.last
 
+            # ── Time-based exit ─────────────────────────────────────────────
+            hold_secs = (datetime.now(timezone.utc) - trade.opened_at).total_seconds()
+            max_hold  = self._max_hold_seconds(trade.signal_type)
+            if hold_secs >= max_hold:
+                logger.info(
+                    "OrderManager TIME [%s]: max hold %ds reached (held %.0fs) — exiting",
+                    trade.symbol, max_hold, hold_secs,
+                )
+                trades_to_close.append((trade, "time_exit"))
+                continue
+
             # ── Trailing stop ───────────────────────────────────────────────
-            stop_dist = trade.initial_stop_distance
+            stop_dist  = trade.initial_stop_distance
+            be_r       = self._breakeven_r(trade.signal_type)
             if stop_dist > 0:
                 if trade.direction == "long":
                     unrealized_r = (current - trade.entry_price) / stop_dist
@@ -371,13 +411,13 @@ class OrderManager:
                                 "OrderManager TRAIL [%s]: stop moved %.4f→%.4f (unrealized_r=%.2f)",
                                 trade.symbol, old_stop, trade.stop_price, unrealized_r,
                             )
-                    elif unrealized_r >= 1.0:
+                    elif unrealized_r >= be_r:
                         if trade.entry_price > trade.stop_price:
                             old_stop = trade.stop_price
                             trade.stop_price = trade.entry_price
                             logger.info(
-                                "OrderManager TRAIL [%s]: stop moved %.4f→%.4f (unrealized_r=%.2f)",
-                                trade.symbol, old_stop, trade.stop_price, unrealized_r,
+                                "OrderManager TRAIL [%s]: breakeven %.4f→%.4f (unrealized_r=%.2f, be_r=%.1f)",
+                                trade.symbol, old_stop, trade.stop_price, unrealized_r, be_r,
                             )
                 else:  # short
                     unrealized_r = (trade.entry_price - current) / stop_dist
@@ -390,13 +430,13 @@ class OrderManager:
                                 "OrderManager TRAIL [%s]: stop moved %.4f→%.4f (unrealized_r=%.2f)",
                                 trade.symbol, old_stop, trade.stop_price, unrealized_r,
                             )
-                    elif unrealized_r >= 1.0:
+                    elif unrealized_r >= be_r:
                         if trade.entry_price < trade.stop_price:
                             old_stop = trade.stop_price
                             trade.stop_price = trade.entry_price
                             logger.info(
-                                "OrderManager TRAIL [%s]: stop moved %.4f→%.4f (unrealized_r=%.2f)",
-                                trade.symbol, old_stop, trade.stop_price, unrealized_r,
+                                "OrderManager TRAIL [%s]: breakeven %.4f→%.4f (unrealized_r=%.2f, be_r=%.1f)",
+                                trade.symbol, old_stop, trade.stop_price, unrealized_r, be_r,
                             )
 
             # ── Target / stop exit checks ───────────────────────────────────

@@ -115,7 +115,9 @@ class VwapSignal(BaseSignal):
             return None
 
         stop_price, target_price = self._stop_and_target(
-            current_price, direction, atr_val
+            current_price, direction, atr_val,
+            stop_multiplier=cfg.vwap_cross_stop_atr,
+            reward_ratio=cfg.vwap_cross_reward_ratio,
         )
 
         return SignalResult(

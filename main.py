@@ -162,10 +162,54 @@ class Rosetta1:
     # Run
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Data feed health check
+    # ------------------------------------------------------------------
+
+    def _wait_for_data_feed(
+        self,
+        symbol: str = "SPY",
+        max_retries: int = 10,
+        retry_interval: int = 30,
+    ) -> bool:
+        """
+        Block until yfinance returns usable 1-minute bars for *symbol*.
+
+        Runs up to max_retries attempts, sleeping retry_interval seconds
+        between each.  Returns True when healthy, False if all retries
+        are exhausted (caller should abort startup).
+        """
+        import yfinance as yf
+        for attempt in range(1, max_retries + 1):
+            try:
+                df = yf.download(symbol, period="1d", interval="1m", progress=False)
+                if len(df) > 10:
+                    logger.info(
+                        "Data feed healthy — %d bars for %s", len(df), symbol
+                    )
+                    return True
+                logger.warning(
+                    "Data feed check failed (attempt %d/%d) — %s returned %d rows. "
+                    "Retrying in %ds...",
+                    attempt, max_retries, symbol, len(df), retry_interval,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Data feed check error (attempt %d/%d): %s. Retrying in %ds...",
+                    attempt, max_retries, exc, retry_interval,
+                )
+            time.sleep(retry_interval)
+        logger.error("Data feed unavailable after %d attempts — exiting", max_retries)
+        return False
+
     def run(self) -> None:
         """Seed bars, start all subsystems, and block until shutdown."""
         mode = "LIVE" if self._args.live else "PAPER"
         logger.info("Rosetta1 starting | mode=%s | symbols=%s", mode, self._symbols)
+
+        # ── Verify data feed before doing anything else ──────────────────────
+        if not self._wait_for_data_feed():
+            return
 
         # ── Seed historical bars ─────────────────────────────────────────────
         logger.info("Seeding OHLCV bars…")

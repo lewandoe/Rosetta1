@@ -150,6 +150,8 @@ class RsiSignal(BaseSignal):
 
         stop_price, target_price = self._stop_and_target(
             current_price, direction, atr_val,
+            stop_multiplier=cfg.rsi_reversal_stop_atr,
+            reward_ratio=cfg.rsi_reversal_reward_ratio,
         )
 
         return SignalResult(

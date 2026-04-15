@@ -107,7 +107,7 @@ class SignalSettings(BaseSettings):
         description="Number of bars to measure SPY trend direction."
     )
     disabled_signals: list[str] = Field(
-        default=["orb"],
+        default=[],
         description="Signal types to skip. Valid: momentum, vwap_cross, ema_cross, orb, rsi"
     )
 
@@ -130,19 +130,37 @@ class SignalSettings(BaseSettings):
     # Opening Range Breakout: minutes after open that define the range
     orb_minutes: int = Field(default=15, description="ORB range window in minutes after open")
 
-    # ATR-based stop sizing
+    # ATR-based stop sizing — global fallback (used only if per-signal override is missing)
     stop_atr_multiplier: float = Field(
-        default=3.0,
-        description="ATR multiplier for stop distance. "
-                    "3.0 = stop placed 3× ATR from entry. "
-                    "Higher = more room to breathe, larger losses when stopped.",
+        default=2.0,
+        description="Fallback ATR multiplier for stop distance.",
     )
     reward_risk_ratio: float = Field(
-        default=1.5,
-        description="Target distance as multiple of stop distance. "
-                    "1.5 = target is 1.5× further than stop. "
-                    "Higher = larger wins but lower win rate.",
+        default=1.2,
+        description="Fallback target as multiple of stop distance.",
     )
+
+    # Per-signal stop multipliers and reward/risk ratios
+    # Trend signals (momentum, ema_cross, orb) run wider stops and larger targets.
+    # Mean-reversion signals (vwap_cross, rsi_reversal) bank gains quickly.
+    momentum_stop_atr: float = Field(default=2.5, description="Momentum stop: 2.5× ATR")
+    momentum_reward_ratio: float = Field(default=1.3, description="Momentum R:R 1.3")
+    ema_cross_stop_atr: float = Field(default=2.0, description="EMA cross stop: 2.0× ATR")
+    ema_cross_reward_ratio: float = Field(default=1.2, description="EMA cross R:R 1.2")
+    vwap_cross_stop_atr: float = Field(default=1.5, description="VWAP cross stop: 1.5× ATR")
+    vwap_cross_reward_ratio: float = Field(default=1.0, description="VWAP cross R:R 1.0")
+    rsi_reversal_stop_atr: float = Field(default=1.5, description="RSI reversal stop: 1.5× ATR")
+    rsi_reversal_reward_ratio: float = Field(default=1.0, description="RSI reversal R:R 1.0")
+    orb_stop_atr: float = Field(default=2.0, description="ORB stop: 2.0× ATR")
+    orb_reward_ratio: float = Field(default=2.0, description="ORB R:R 2.0")
+
+    # Trailing stop breakeven activation (in R multiples).
+    # Mean-reversion signals move to breakeven at 0.5R; trend signals at 1.0R.
+    momentum_breakeven_r: float = Field(default=1.0)
+    ema_cross_breakeven_r: float = Field(default=1.0)
+    vwap_cross_breakeven_r: float = Field(default=0.5)
+    rsi_reversal_breakeven_r: float = Field(default=0.5)
+    orb_breakeven_r: float = Field(default=1.0)
 
     # Cross-symbol sector confirmation
     sector_confirmation_enabled: bool = Field(
@@ -216,6 +234,14 @@ class ExecutionSettings(BaseSettings):
 
     # Maximum retries for transient broker API errors before halting
     max_order_retries: int = Field(default=3)
+
+    # Maximum hold time per signal type before a time-based exit fires.
+    # Trades that haven't moved have decaying edge — exit and redeploy capital.
+    momentum_max_hold_seconds: int = Field(default=480,  description="8 min")
+    ema_cross_max_hold_seconds: int = Field(default=720,  description="12 min")
+    vwap_cross_max_hold_seconds: int = Field(default=360,  description="6 min")
+    rsi_reversal_max_hold_seconds: int = Field(default=480,  description="8 min")
+    orb_max_hold_seconds: int = Field(default=1500, description="25 min")
 
 
 class BacktestSettings(BaseSettings):

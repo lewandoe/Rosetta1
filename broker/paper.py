@@ -82,33 +82,81 @@ class PaperBroker(BrokerInterface):
 
     def _fetch_quote_yf(self, symbol: str) -> Quote:
         """
-        Pull a real-time quote from yfinance.
+        Pull a real-time quote from yfinance with a three-level fallback chain.
 
-        yfinance `fast_info` returns a lightweight snapshot without pulling
-        full history, which is appropriate for order simulation.
+        Primary:    fast_info.last_price (lightweight, no full history pull)
+        Fallback 1: yf.download period="5d" — last row close price
+        Fallback 2: fast_info retry (catches transient None returns)
+        Fallback 3: cached position price (last known fill price)
+
+        Raises BrokerError only if all four attempts fail.
         """
+        def _make_quote(price: float, volume: int = 0) -> Quote:
+            return Quote(
+                symbol=symbol,
+                bid=price * 0.9995,
+                ask=price * 1.0005,
+                last=price,
+                volume=volume,
+                timestamp=datetime.utcnow(),
+            )
+
+        # ── Primary: fast_info ───────────────────────────────────────────────
         try:
             info = yf.Ticker(symbol).fast_info
             lp = getattr(info, "last_price", None)
             pc = getattr(info, "previous_close", None)
             op = getattr(info, "open", None)
-            last = float(lp if lp is not None else pc if pc is not None else op if op is not None else 0.0)
-            bid = last * 0.9995
-            ask = last * 1.0005
-            volume = int(getattr(info, "three_month_average_volume", None) or 0)
-            return Quote(
-                symbol=symbol,
-                bid=bid,
-                ask=ask,
-                last=last,
-                volume=volume,
-                timestamp=datetime.utcnow(),
+            price = lp if lp is not None else pc if pc is not None else op
+            if price is not None and float(price) > 0:
+                volume = int(getattr(info, "three_month_average_volume", None) or 0)
+                return _make_quote(float(price), volume)
+        except Exception:
+            pass
+
+        # ── Fallback 1: 5-day 1-min download — last close row ────────────────
+        try:
+            df = yf.download(symbol, period="5d", interval="1m",
+                             progress=False, auto_adjust=True)
+            if len(df) > 0:
+                if isinstance(df.columns, pd.MultiIndex):
+                    price = float(df[("Close", symbol)].dropna().iloc[-1])
+                else:
+                    price = float(df["Close"].dropna().iloc[-1])
+                if price > 0:
+                    logger.warning(
+                        "get_quote [%s]: primary failed, using fallback 1 (5d download)",
+                        symbol,
+                    )
+                    return _make_quote(price)
+        except Exception:
+            pass
+
+        # ── Fallback 2: fast_info.last_price explicit retry ──────────────────
+        try:
+            price = getattr(yf.Ticker(symbol).fast_info, "last_price", None)
+            if price is not None and float(price) > 0:
+                logger.warning(
+                    "get_quote [%s]: primary failed, using fallback 2 (fast_info retry)",
+                    symbol,
+                )
+                return _make_quote(float(price))
+        except Exception:
+            pass
+
+        # ── Fallback 3: last known position price ────────────────────────────
+        with self._lock:
+            pos = self._positions.get(symbol)
+        if pos is not None and pos.current_price > 0:
+            logger.warning(
+                "get_quote [%s]: primary failed, using fallback 3 (cached position price=%.4f)",
+                symbol, pos.current_price,
             )
-        except Exception as exc:
-            # Fail loudly — never silently proceed with a bad quote
-            raise BrokerError(
-                f"PaperBroker: failed to fetch quote for {symbol}: {exc}"
-            ) from exc
+            return _make_quote(pos.current_price)
+
+        raise BrokerError(
+            f"PaperBroker: all quote fallbacks exhausted for {symbol}"
+        )
 
     def _validate_symbol(self, symbol: str) -> None:
         if symbol not in self._universe:

@@ -102,21 +102,29 @@ class BaseSignal(abc.ABC):
         entry: float,
         direction: str,
         atr: float,
+        stop_multiplier: float | None = None,
+        reward_ratio: float | None = None,
     ) -> tuple[float, float]:
         """
-        Compute stop_price and target_price using ATR-based sizing from settings.
+        Compute stop_price and target_price using ATR-based sizing.
 
-        stop_distance  = atr × settings.signals.stop_atr_multiplier
-        target_distance = stop_distance × settings.signals.reward_risk_ratio
+        stop_distance   = atr × stop_multiplier
+        target_distance = stop_distance × reward_ratio
+
+        stop_multiplier and reward_ratio default to global settings if not
+        provided, but each signal passes its own values so stops and targets
+        are calibrated to the statistical profile of that signal type.
 
         Returns:
             (stop_price, target_price)
         """
-        stop_distance = atr * settings.signals.stop_atr_multiplier
+        sm = stop_multiplier if stop_multiplier is not None else settings.signals.stop_atr_multiplier
+        rr = reward_ratio   if reward_ratio   is not None else settings.signals.reward_risk_ratio
+        stop_distance = atr * sm
         if direction == "long":
             stop_price   = entry - stop_distance
-            target_price = entry + (stop_distance * settings.signals.reward_risk_ratio)
+            target_price = entry + (stop_distance * rr)
         else:
             stop_price   = entry + stop_distance
-            target_price = entry - (stop_distance * settings.signals.reward_risk_ratio)
+            target_price = entry - (stop_distance * rr)
         return stop_price, target_price

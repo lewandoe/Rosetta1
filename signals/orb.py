@@ -183,6 +183,8 @@ class OrbSignal(BaseSignal):
 
         stop_price, target_price = self._stop_and_target(
             current_price, direction, atr_val,
+            stop_multiplier=cfg.orb_stop_atr,
+            reward_ratio=cfg.orb_reward_ratio,
         )
 
         return SignalResult(
