@@ -296,6 +296,65 @@ def regime_score(df: pd.DataFrame, lookback: int = 20) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Multi-Timeframe EMA trend direction
+# ---------------------------------------------------------------------------
+
+def mtf_trend_direction(
+    bars_1m: pd.DataFrame,
+    ema_period: int = 21,
+) -> str:
+    """
+    Determine trend direction using multi-timeframe EMA alignment.
+
+    Resamples 1-min bars into 5-min and 15-min, computes EMA on each,
+    then votes: if 2 of 3 timeframes agree, that's the trend.
+
+    Requires a DatetimeIndex (the standard output of seed_bars() / add_all()).
+
+    Returns: "long", "short", or "neutral"
+    """
+    _require_cols(bars_1m, "close", fn_name="mtf_trend_direction")
+
+    if len(bars_1m) < ema_period * 15:
+        return "neutral"  # not enough data for 15-min resample
+
+    # 1-min EMA direction
+    ema_1m = bars_1m["close"].ewm(span=ema_period, adjust=False).mean()
+    dir_1m = "long" if ema_1m.iloc[-1] > ema_1m.iloc[-2] else "short"
+
+    # Resample to 5-min
+    bars_5m = bars_1m.resample("5min").agg({
+        "open": "first", "high": "max", "low": "min",
+        "close": "last", "volume": "sum"
+    }).dropna()
+    if len(bars_5m) < ema_period:
+        return dir_1m  # fallback to 1-min only
+    ema_5m = bars_5m["close"].ewm(span=ema_period, adjust=False).mean()
+    dir_5m = "long" if ema_5m.iloc[-1] > ema_5m.iloc[-2] else "short"
+
+    # Resample to 15-min
+    bars_15m = bars_1m.resample("15min").agg({
+        "open": "first", "high": "max", "low": "min",
+        "close": "last", "volume": "sum"
+    }).dropna()
+    if len(bars_15m) < ema_period:
+        votes = [dir_1m, dir_5m]
+    else:
+        ema_15m = bars_15m["close"].ewm(span=ema_period, adjust=False).mean()
+        dir_15m = "long" if ema_15m.iloc[-1] > ema_15m.iloc[-2] else "short"
+        votes = [dir_1m, dir_5m, dir_15m]
+
+    long_votes  = sum(1 for v in votes if v == "long")
+    short_votes = sum(1 for v in votes if v == "short")
+
+    if long_votes > short_votes:
+        return "long"
+    elif short_votes > long_votes:
+        return "short"
+    return "neutral"
+
+
+# ---------------------------------------------------------------------------
 # Convenience: compute all indicators in one call
 # ---------------------------------------------------------------------------
 

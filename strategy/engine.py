@@ -1,23 +1,21 @@
 """
-strategy/engine.py — Signal aggregator and confidence engine.
+strategy/engine.py — Regime-first signal engine.
 
-Wires all 5 strategy instances together and produces a single best
-SignalResult per evaluation cycle, or None if no signal meets the bar.
+Pipeline per evaluation cycle:
+  1. Volume gate  — bar must have volume >= volume_gate_multiplier × volume_ma.
+  2. Regime       — classify trending / ranging / mixed.
+  3. MTF alignment — 1-min / 5-min / 15-min EMA(21) must agree with signal direction.
+  4. Strategy selection — only run strategies valid for the current regime,
+     excluding disabled_signals.
+  5. Sector confirmation — adjust confidence ± based on sector ETF direction.
+  6. Confidence gate — drop signals below min_confidence_score.
 
-Aggregation logic:
-  1. Run all 5 strategies.  Collect results that pass their own confidence
-     threshold (>= settings.signals.min_confidence_score).
-  2. Group results by direction (long / short).
-  3. For the dominant direction, award a consensus bonus of +CONSENSUS_BONUS
-     points for each *additional* strategy that agrees (beyond the first).
-     The bonus is applied to the highest-confidence signal in that group.
-  4. Return the signal with the highest adjusted confidence, provided it
-     still meets min_confidence_score after all adjustments.
-     If both directions tie, prefer the one with more confirming strategies.
-
-Consensus bonus: 5 points per additional confirming strategy (max 4 extras
-= +20 points).  Keeps the scale meaningful without overwhelming individual
-strategy scores.
+Removed from the old design:
+  - Consensus bonus (_aggregate) — regime + MTF filters do a better job
+    of reducing noise than voting across all strategies simultaneously.
+  - Macro bias (_get_macro_bias / SPY VWAP check) — replaced by MTF
+    alignment which checks the symbol's own multi-timeframe trend.
+  - _run_all() / _aggregate() — folded into evaluate().
 
 Dependency rule: strategy/ may import from config/, data/, and signals/.
 It must NOT import from broker/, execution/, risk/.
@@ -26,58 +24,32 @@ It must NOT import from broker/, execution/, risk/.
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import pandas as pd
 
 from config.settings import settings
+from data.indicators import latest, mtf_trend_direction
 from data.regime import classify_regime, is_strategy_valid_for_regime
 from data.sector import get_sector_etf, sector_confidence_adjustment
 from signals.base import BaseSignal, SignalResult
-from signals.momentum import MomentumSignal
-from signals.vwap import VwapSignal
 from signals.ema_cross import EmaCrossSignal
+from signals.momentum import MomentumSignal
 from signals.orb import OrbSignal
 from signals.rsi import RsiSignal
+from signals.vwap import VwapSignal
 
 logger = logging.getLogger(__name__)
 
-# Points awarded per additional strategy that agrees with the top signal
-CONSENSUS_BONUS = 5
-
-
-
-def _get_macro_bias(bars_dict: dict) -> str | None:
-    """
-    Returns 'long', 'short', or None based on SPY vs VWAP.
-    None means no clear bias — allow both directions.
-    """
-    from config.settings import settings
-    if not settings.signals.macro_bias_enabled:
-        return None
-    
-    spy_bars = bars_dict.get(settings.signals.macro_bias_symbol)
-    if spy_bars is None or len(spy_bars) < settings.signals.macro_bias_bars + 1:
-        return None
-    
-    try:
-        from data.indicators import latest
-        spy_price = latest(spy_bars, "close")
-        spy_vwap = latest(spy_bars, "vwap")
-
-        # VWAP position is the sole arbiter of bias.
-        # Returns None only when data is unavailable (handled above).
-        return "long" if spy_price > spy_vwap else "short"
-    except Exception:
-        return None
 
 class SignalEngine:
     """
-    Aggregates all 5 signal strategies for a single symbol.
+    Regime-first signal engine for a single symbol.
 
     Usage (called once per poll cycle per symbol):
         engine = SignalEngine()
-        result = engine.evaluate(df, symbol="SPY", current_price=512.34)
+        result = engine.evaluate(df, symbol="AAPL", current_price=195.40,
+                                  bars_dict=all_bars)
         if result:
             # send to risk guard → order manager
     """
@@ -101,82 +73,171 @@ class SignalEngine:
         symbol: str,
         current_price: float,
         bars_dict: dict[str, pd.DataFrame] | None = None,
+        quote: object | None = None,
     ) -> Optional[SignalResult]:
         """
-        Run all strategies, aggregate, return best signal or None.
+        Regime-first signal evaluation.
 
         Args:
             df:            add_all() DataFrame — must have all indicator columns.
             symbol:        Ticker being evaluated.
-            current_price: Latest quote price (ask for long entry reference).
+            current_price: Latest quote price.
             bars_dict:     All symbols' bar DataFrames keyed by symbol, used for
-                           cross-symbol sector ETF confirmation scoring.
+                           sector ETF confirmation scoring.
+            quote:         Optional Quote object — if supplied, bid/ask are
+                           propagated into the signal metadata so the risk guard
+                           can run a spread check and the order manager can size
+                           limit-order prices.
 
         Returns:
-            Best SignalResult after consensus boosting and sector adjustment, or None.
+            Best SignalResult after regime + MTF + sector filtering, or None.
         """
-        raw_signals = self._run_all(df, symbol, current_price)
+        cfg = settings.signals
 
-        if not raw_signals:
-            return None
-
-        best = self._aggregate(raw_signals, bars_dict=bars_dict)
-
-        if best is None:
-            return None
-
-        # ── Sector ETF confirmation adjustment ───────────────────────────────
-        sector_adj = 0
-        if settings.signals.sector_confirmation_enabled and bars_dict:
-            sector_adj = sector_confidence_adjustment(
-                symbol=best.symbol,
-                direction=best.direction,
-                bars_dict=bars_dict,
-                lookback=settings.signals.sector_trend_bars,
-                bonus=settings.signals.sector_confirmation_bonus,
-                penalty=settings.signals.sector_confirmation_penalty,
-            )
-            if sector_adj != 0:
-                logger.info(
-                    "SignalEngine [%s]: sector adjustment %+d (ETF=%s, direction=%s)",
-                    best.symbol, sector_adj,
-                    get_sector_etf(best.symbol), best.direction,
-                )
-                best = SignalResult(
-                    symbol=best.symbol,
-                    signal_type=best.signal_type,
-                    direction=best.direction,
-                    entry_price=best.entry_price,
-                    target_price=best.target_price,
-                    stop_price=best.stop_price,
-                    confidence=min(max(best.confidence + sector_adj, 0), 100),
-                    estimated_hold_seconds=best.estimated_hold_seconds,
-                    timestamp=best.timestamp,
-                    metadata={
-                        **best.metadata,
-                        "sector_adjustment": sector_adj,
-                        "sector_etf": get_sector_etf(best.symbol),
-                    },
-                )
-                # Re-check threshold after sector penalty may have dropped confidence
-                if best.confidence < settings.signals.min_confidence_score:
-                    logger.debug(
-                        "SignalEngine [%s]: signal dropped below threshold after "
-                        "sector penalty (confidence=%d)",
-                        symbol, best.confidence,
-                    )
-                    return None
-
+        # ── Gate 1: Volume ────────────────────────────────────────────────────
         try:
-            regime_label = classify_regime(df).regime.value
+            vol    = latest(df, "volume")
+            vol_ma = latest(df, "volume_ma")
+            if vol_ma > 0 and vol < vol_ma * cfg.volume_gate_multiplier:
+                logger.debug(
+                    "SignalEngine [%s]: volume gate blocked (vol=%.0f, ma=%.0f, mult=%.1f)",
+                    symbol, vol, vol_ma, cfg.volume_gate_multiplier,
+                )
+                return None
         except Exception:
-            regime_label = "unknown"
+            pass  # missing volume_ma is fine — gate skipped, not hard-blocked
+
+        # ── Gate 2: Regime classification ─────────────────────────────────────
+        try:
+            regime_result = classify_regime(df)
+            regime = regime_result.regime
+        except Exception as exc:
+            logger.debug("SignalEngine [%s]: regime classification failed — %s", symbol, exc)
+            regime_result = None
+            regime = None
+
+        # ── Gate 3: Multi-Timeframe alignment ─────────────────────────────────
+        mtf_dir = "neutral"
+        if cfg.mtf_enabled:
+            try:
+                mtf_dir = mtf_trend_direction(df, cfg.mtf_ema_period)
+            except Exception as exc:
+                logger.debug("SignalEngine [%s]: MTF check failed — %s", symbol, exc)
+
+        # ── Gate 4: Select strategies valid for this regime ───────────────────
+        candidate_strategies: List[BaseSignal] = []
+        for strategy in self._strategies:
+            if strategy.name in cfg.disabled_signals:
+                continue
+            if regime is not None and not is_strategy_valid_for_regime(strategy.name, regime):
+                logger.debug(
+                    "SignalEngine [%s]: %s suppressed — regime=%s (score=%.2f)",
+                    symbol, strategy.name,
+                    regime.value, regime_result.score if regime_result else 0.0,
+                )
+                continue
+            candidate_strategies.append(strategy)
+
+        if not candidate_strategies:
+            return None
+
+        # ── Gate 5: Run candidates + MTF direction filter ─────────────────────
+        results: List[SignalResult] = []
+        for strategy in candidate_strategies:
+            try:
+                result = strategy.evaluate(df, symbol, current_price)
+                if result is None:
+                    continue
+                # MTF alignment: reject signals opposing the multi-timeframe trend
+                if mtf_dir != "neutral" and result.direction != mtf_dir:
+                    logger.debug(
+                        "SignalEngine [%s]: MTF filter rejected %s %s (mtf=%s)",
+                        symbol, strategy.name, result.direction, mtf_dir,
+                    )
+                    continue
+                results.append(result)
+                logger.debug(
+                    "SignalEngine [%s]: %s fired %s confidence=%d",
+                    symbol, strategy.name, result.direction, result.confidence,
+                )
+            except Exception as exc:
+                logger.error(
+                    "SignalEngine [%s]: strategy %s raised unexpectedly: %s",
+                    symbol, strategy.name, exc, exc_info=True,
+                )
+
+        if not results:
+            return None
+
+        # Pick the highest-confidence result
+        best = max(results, key=lambda r: r.confidence)
+
+        # ── Gate 6: Sector ETF confirmation ───────────────────────────────────
+        sector_adj = 0
+        if cfg.sector_confirmation_enabled and bars_dict:
+            try:
+                sector_adj = sector_confidence_adjustment(
+                    symbol=best.symbol,
+                    direction=best.direction,
+                    bars_dict=bars_dict,
+                    lookback=cfg.sector_trend_bars,
+                    bonus=cfg.sector_confirmation_bonus,
+                    penalty=cfg.sector_confirmation_penalty,
+                )
+                if sector_adj != 0:
+                    logger.info(
+                        "SignalEngine [%s]: sector adjustment %+d (ETF=%s, direction=%s)",
+                        best.symbol, sector_adj,
+                        get_sector_etf(best.symbol), best.direction,
+                    )
+            except Exception as exc:
+                logger.debug("SignalEngine [%s]: sector adjustment failed — %s", symbol, exc)
+
+        # Rebuild SignalResult with regime + MTF metadata (and sector adj if any)
+        meta = {
+            **best.metadata,
+            "regime":        regime.value if regime else "unknown",
+            "regime_score":  regime_result.score if regime_result else None,
+            "mtf_direction": mtf_dir,
+            "sector_adj":    sector_adj,
+        }
+        if quote is not None:
+            bid = getattr(quote, "bid", None)
+            ask = getattr(quote, "ask", None)
+            if bid is not None:
+                meta["bid_price"] = float(bid)
+            if ask is not None:
+                meta["ask_price"] = float(ask)
+
+        best = SignalResult(
+            symbol=best.symbol,
+            signal_type=best.signal_type,
+            direction=best.direction,
+            entry_price=best.entry_price,
+            target_price=best.target_price,
+            stop_price=best.stop_price,
+            confidence=min(max(best.confidence + sector_adj, 0), 100),
+            estimated_hold_seconds=best.estimated_hold_seconds,
+            timestamp=best.timestamp,
+            metadata=meta,
+        )
+
+        # ── Final confidence gate ─────────────────────────────────────────────
+        if best.confidence < cfg.min_confidence_score:
+            logger.debug(
+                "SignalEngine [%s]: %s dropped below threshold (confidence=%d, min=%d)",
+                symbol, best.signal_type, best.confidence, cfg.min_confidence_score,
+            )
+            return None
 
         logger.info(
-            "SignalEngine [%s]: %s %s | confidence=%d | regime=%s | sector_adj=%+d | "
-            "entry=%.2f target=%.2f stop=%.2f | R:R=1:%.2f",
-            symbol, best.direction.upper(), best.signal_type,
-            best.confidence, regime_label, sector_adj,
+            "Signal FIRE [%s] %s %s | conf=%d | regime=%s | mtf=%s | "
+            "sector_adj=%+d | entry=%.2f target=%.2f stop=%.2f | R:R=1:%.2f",
+            best.symbol, best.direction.upper(), best.signal_type,
+            best.confidence,
+            regime.value if regime else "unknown",
+            mtf_dir,
+            sector_adj,
             best.entry_price, best.target_price, best.stop_price,
             best.reward / best.risk if best.risk > 0 else 0,
         )
@@ -189,10 +250,23 @@ class SignalEngine:
         current_price: float,
     ) -> List[SignalResult]:
         """
-        Return all individual strategy results (before aggregation).
-        Used by tests and the dashboard to show scanner state per strategy.
+        Return all individual strategy results without regime/MTF/volume gates.
+        Used by tests and the dashboard to show per-strategy scanner state.
         """
-        return self._run_all(df, symbol, current_price)
+        results: List[SignalResult] = []
+        for strategy in self._strategies:
+            if strategy.name in settings.signals.disabled_signals:
+                continue
+            try:
+                result = strategy.evaluate(df, symbol, current_price)
+                if result is not None:
+                    results.append(result)
+            except Exception as exc:
+                logger.error(
+                    "SignalEngine [%s]: strategy %s raised unexpectedly: %s",
+                    symbol, strategy.name, exc, exc_info=True,
+                )
+        return results
 
     def reset_session(self) -> None:
         """
@@ -203,136 +277,3 @@ class SignalEngine:
             if hasattr(s, "reset_session"):
                 s.reset_session()
         logger.info("SignalEngine: session state reset for all strategies")
-
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
-
-    def _run_all(
-        self,
-        df: pd.DataFrame,
-        symbol: str,
-        current_price: float,
-    ) -> List[SignalResult]:
-        """Run every strategy and collect non-None results."""
-        results: List[SignalResult] = []
-
-        # Classify regime once per tick — shared across all strategies
-        regime_result = None
-        try:
-            regime_result = classify_regime(df)
-        except Exception:
-            pass  # if regime check fails, allow all strategies through
-
-        for strategy in self._strategies:
-            if strategy.name in settings.signals.disabled_signals:
-                continue
-
-            # Regime filter — suppress strategies inappropriate for current market
-            if regime_result is not None:
-                if not is_strategy_valid_for_regime(strategy.name, regime_result.regime):
-                    logger.debug(
-                        "SignalEngine [%s]: %s suppressed — regime=%s (score=%.2f)",
-                        symbol, strategy.name,
-                        regime_result.regime.value, regime_result.score,
-                    )
-                    continue
-
-            try:
-                result = strategy.evaluate(df, symbol, current_price)
-                if result is not None:
-                    results.append(result)
-                    logger.debug(
-                        "SignalEngine [%s]: %s fired %s confidence=%d",
-                        symbol, strategy.name, result.direction, result.confidence,
-                    )
-            except Exception as exc:
-                # A buggy strategy must never take down the engine.
-                # Log loudly but continue evaluating remaining strategies.
-                logger.error(
-                    "SignalEngine [%s]: strategy %s raised unexpectedly: %s",
-                    symbol, strategy.name, exc, exc_info=True,
-                )
-        return results
-
-    def _aggregate(self, signals: List[SignalResult], bars_dict: dict | None = None) -> Optional[SignalResult]:
-        """
-        Apply consensus boosting and return the best signal.
-
-        Groups by direction, finds dominant group, boosts the top signal
-        in that group by CONSENSUS_BONUS per additional confirming strategy.
-        """
-        # Apply macro bias filter — only allow signals aligned with SPY trend
-        macro_bias = _get_macro_bias(bars_dict or {})
-        if macro_bias is not None:
-            signals = [s for s in signals if s.direction == macro_bias]
-            if signals:
-                logger.info(
-                    "MacroBias: SPY bias=%s — filtered to %d aligned signal(s)",
-                    macro_bias, len(signals)
-                )
-            else:
-                logger.debug("MacroBias: SPY bias=%s — all signals filtered out", macro_bias)
-                return None
-
-        by_direction: Dict[str, List[SignalResult]] = {"long": [], "short": []}
-        for sig in signals:
-            by_direction[sig.direction].append(sig)
-
-        # Sort each group by confidence descending
-        for direction in by_direction:
-            by_direction[direction].sort(key=lambda s: s.confidence, reverse=True)
-
-        long_signals  = by_direction["long"]
-        short_signals = by_direction["short"]
-
-        # Pick dominant direction (more signals = more conviction; ties go to higher top score)
-        if not long_signals and not short_signals:
-            return None
-
-        def _best_in_group(group: List[SignalResult]) -> Optional[SignalResult]:
-            if not group:
-                return None
-            top = group[0]
-            # Consensus boost: +BONUS per additional agreeing strategy
-            bonus = CONSENSUS_BONUS * (len(group) - 1)
-            # Return a copy with boosted confidence (cap at 100)
-            boosted = SignalResult(
-                symbol=top.symbol,
-                signal_type=top.signal_type,
-                direction=top.direction,
-                entry_price=top.entry_price,
-                target_price=top.target_price,
-                stop_price=top.stop_price,
-                confidence=min(top.confidence + bonus, 100),
-                estimated_hold_seconds=top.estimated_hold_seconds,
-                timestamp=top.timestamp,
-                metadata={
-                    **top.metadata,
-                    "consensus_count": len(group),
-                    "consensus_bonus": bonus,
-                    "contributing_strategies": [s.signal_type for s in group],
-                },
-            )
-            return boosted
-
-        long_best  = _best_in_group(long_signals)
-        short_best = _best_in_group(short_signals)
-
-        # Select between long and short candidates
-        candidates = [s for s in [long_best, short_best] if s is not None]
-        if not candidates:
-            return None
-
-        # Primary sort: confidence desc; secondary: consensus count desc
-        candidates.sort(
-            key=lambda s: (s.confidence, s.metadata.get("consensus_count", 1)),
-            reverse=True,
-        )
-        best = candidates[0]
-
-        # Final threshold check after boosting
-        if best.confidence < settings.signals.min_confidence_score:
-            return None
-
-        return best

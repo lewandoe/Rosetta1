@@ -86,12 +86,27 @@ class RiskSettings(BaseSettings):
                     "Prevents runaway sizing on very low ATR symbols.",
     )
 
+    # Consecutive loss circuit breaker
+    consecutive_loss_pause_threshold: int = Field(
+        default=3,
+        description="Pause trading for consecutive_loss_pause_minutes after this many consecutive losses.",
+    )
+    consecutive_loss_pause_minutes: int = Field(
+        default=10,
+        description="Minutes to pause after hitting consecutive_loss_pause_threshold.",
+    )
+    consecutive_loss_halt_threshold: int = Field(
+        default=5,
+        description="Halt trading for the session after this many consecutive losses. "
+                    "Reset at start of next trading day.",
+    )
+
 
 class SignalSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # Only fire signals above this confidence threshold
-    min_confidence_score: int = Field(default=62, description="Minimum signal confidence (0–100)")
+    min_confidence_score: int = Field(default=55, description="Minimum signal confidence (0–100)")
     macro_bias_enabled: bool = Field(
         default=True,
         description="Only take longs when SPY is above VWAP and trending up. "
@@ -107,7 +122,7 @@ class SignalSettings(BaseSettings):
         description="Number of bars to measure SPY trend direction."
     )
     disabled_signals: list[str] = Field(
-        default=[],
+        default=["momentum"],
         description="Signal types to skip. Valid: momentum, vwap_cross, ema_cross, orb, rsi"
     )
 
@@ -122,7 +137,7 @@ class SignalSettings(BaseSettings):
     rsi_overbought: int = Field(default=70)
 
     # ATR period (used for dynamic stop sizing)
-    atr_period: int = Field(default=14)
+    atr_period: int = Field(default=7)
 
     # Volume MA period (used for volume confirmation)
     volume_ma_period: int = Field(default=20)
@@ -132,11 +147,11 @@ class SignalSettings(BaseSettings):
 
     # ATR-based stop sizing — global fallback (used only if per-signal override is missing)
     stop_atr_multiplier: float = Field(
-        default=2.0,
+        default=1.0,
         description="Fallback ATR multiplier for stop distance.",
     )
     reward_risk_ratio: float = Field(
-        default=1.2,
+        default=1.5,
         description="Fallback target as multiple of stop distance.",
     )
 
@@ -156,11 +171,11 @@ class SignalSettings(BaseSettings):
 
     # Trailing stop breakeven activation (in R multiples).
     # Mean-reversion signals move to breakeven at 0.5R; trend signals at 1.0R.
-    momentum_breakeven_r: float = Field(default=1.0)
-    ema_cross_breakeven_r: float = Field(default=1.0)
+    momentum_breakeven_r: float = Field(default=0.75)
+    ema_cross_breakeven_r: float = Field(default=0.75)
     vwap_cross_breakeven_r: float = Field(default=0.5)
     rsi_reversal_breakeven_r: float = Field(default=0.5)
-    orb_breakeven_r: float = Field(default=1.0)
+    orb_breakeven_r: float = Field(default=0.75)
 
     # Cross-symbol sector confirmation
     sector_confirmation_enabled: bool = Field(
@@ -179,6 +194,23 @@ class SignalSettings(BaseSettings):
     sector_trend_bars: int = Field(
         default=5,
         description="Number of recent bars to measure ETF trend direction.",
+    )
+
+    # Volume gate — bar must exceed this multiple of volume_ma to be tradeable
+    volume_gate_multiplier: float = Field(
+        default=1.5,
+        description="Minimum volume required as multiple of volume_ma. "
+                    "Filters out low-conviction bars during dead zones.",
+    )
+
+    # Multi-timeframe EMA alignment
+    mtf_enabled: bool = Field(
+        default=True,
+        description="Require 5-min EMA trend to align with signal direction before entry.",
+    )
+    mtf_ema_period: int = Field(
+        default=21,
+        description="EMA period used for multi-timeframe trend check on the 5-min chart.",
     )
 
     # Market regime filter
@@ -243,6 +275,24 @@ class ExecutionSettings(BaseSettings):
     rsi_reversal_max_hold_seconds: int = Field(default=480,  description="8 min")
     orb_max_hold_seconds: int = Field(default=1500, description="25 min")
 
+    # Limit order entry — caps adverse fill price vs. accepting market slippage
+    use_limit_orders: bool = Field(
+        default=True,
+        description="Use limit orders for entries instead of market orders. "
+                    "Caps the worst-case fill price.",
+    )
+    limit_order_offset_pct: float = Field(
+        default=0.0005,
+        description="How far past the touch to set the limit price (0.0005 = 5 bps). "
+                    "BUY: ask × (1 + offset). SELL: bid × (1 - offset). "
+                    "Higher = more likely to fill, less price protection.",
+    )
+    limit_order_timeout_seconds: int = Field(
+        default=5,
+        description="Cancel an unfilled limit entry after this many seconds. "
+                    "Stale signals lose edge fast — better to skip than chase.",
+    )
+
 
 class BacktestSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -270,6 +320,66 @@ class MonitoringSettings(BaseSettings):
     db_path: str = Field(default="/Users/eric/Rosetta1/db/trades.db")
 
 
+class TradingSessionSettings(BaseSettings):
+    """Controls which parts of the trading day are active."""
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    # Market open: 9:30 ET
+    market_open_hour: int = Field(
+        default=9,
+        description="Hour (ET, 24h) of regular market open.",
+    )
+    market_open_minute: int = Field(
+        default=30,
+        description="Minute (ET) of regular market open.",
+    )
+
+    # Market close: 15:59 ET (last actionable minute — aligns with EOD liquidation)
+    market_close_hour: int = Field(
+        default=15,
+        description="Hour (ET, 24h) of regular market close.",
+    )
+    market_close_minute: int = Field(
+        default=59,
+        description="Minute (ET) of regular market close.",
+    )
+
+    # EOD wind-down window — close-only zone before market_close
+    eod_close_minutes_before: int = Field(
+        default=14,
+        description="Minutes before market_close when wind-down starts. "
+                    "With close 15:59 and offset 14 → wind-down starts 15:45 ET.",
+    )
+
+    # Power open window: 9:30–11:30 ET (highest volume, cleanest moves)
+    power_open_end_hour: int = Field(
+        default=11,
+        description="Hour (ET, 24h) when power open window ends.",
+    )
+    power_open_end_minute: int = Field(
+        default=30,
+        description="Minute (ET) when power open window ends.",
+    )
+
+    # Lunch dead zone: 11:30–13:00 ET (low volume, choppy, avoid)
+    lunch_end_hour: int = Field(
+        default=13,
+        description="Hour (ET, 24h) when lunch dead zone ends and afternoon trading resumes.",
+    )
+    lunch_end_minute: int = Field(
+        default=0,
+        description="Minute (ET) when lunch dead zone ends.",
+    )
+
+    # Set to True to allow entries during lunch (not recommended)
+    lunch_trading_enabled: bool = Field(
+        default=False,
+        description="Allow new entries during lunch dead zone (11:30–13:00 ET). "
+                    "Default False — lunch is low-volume and historically unprofitable.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Root settings object — import this everywhere
 # ---------------------------------------------------------------------------
@@ -290,6 +400,7 @@ class Settings(BaseSettings):
     feed: FeedSettings = Field(default_factory=FeedSettings)
     backtest: BacktestSettings = Field(default_factory=BacktestSettings)
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
+    session: TradingSessionSettings = Field(default_factory=TradingSessionSettings)
 
 
 # Module-level singleton — import `settings` directly in all other modules

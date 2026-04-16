@@ -99,6 +99,8 @@ class ClosedTrade:
     opened_at: datetime
     closed_at: datetime
     exit_reason: str        # "target", "stop", "eod", "manual", "slippage"
+    # Snapshot of the originating signal's metadata (regime, atr, mtf, etc.)
+    metadata: dict = field(default_factory=dict)
 
     @property
     def hold_seconds(self) -> float:
@@ -209,11 +211,32 @@ class OrderManager:
             return None
 
         side = OrderSide.BUY if signal.direction == "long" else OrderSide.SELL
+
+        # ── Choose order type: limit (preferred) or market ──────────────────
+        use_limit = settings.execution.use_limit_orders
+        limit_price: Optional[float] = None
+        if use_limit:
+            offset = settings.execution.limit_order_offset_pct
+            bid = signal.metadata.get("bid_price") if signal.metadata else None
+            ask = signal.metadata.get("ask_price") if signal.metadata else None
+            if side == OrderSide.BUY and ask:
+                limit_price = round(ask * (1 + offset), 4)
+            elif side == OrderSide.SELL and bid:
+                limit_price = round(bid * (1 - offset), 4)
+            else:
+                # Fall back to signal entry price ± offset if bid/ask missing
+                ref = signal.entry_price
+                limit_price = round(
+                    ref * (1 + offset) if side == OrderSide.BUY else ref * (1 - offset),
+                    4,
+                )
+
         entry_order = Order(
             symbol=signal.symbol,
             side=side,
             quantity=decision.position_size,
-            order_type=OrderType.MARKET,
+            order_type=OrderType.LIMIT if use_limit else OrderType.MARKET,
+            limit_price=limit_price if use_limit else None,
             time_in_force=settings.execution.default_time_in_force,
             client_order_id=str(uuid.uuid4()),
         )
@@ -233,6 +256,40 @@ class OrderManager:
                 signal.symbol, result.status.value, result.raw,
             )
             return None
+
+        # ── Limit-order timeout: poll until filled or cancel after timeout ──
+        if use_limit and result.status == OrderStatus.PENDING:
+            timeout = settings.execution.limit_order_timeout_seconds
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                time.sleep(0.5)
+                try:
+                    result = self._broker.get_order_status(result.order_id)
+                except BrokerError as exc:
+                    logger.warning(
+                        "OrderManager [%s]: status poll failed — %s", signal.symbol, exc,
+                    )
+                    break
+                if result.status in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED,
+                                      OrderStatus.REJECTED, OrderStatus.FAILED,
+                                      OrderStatus.CANCELLED):
+                    break
+            else:
+                # Loop completed without break — still pending past deadline
+                pass
+
+            if result.status == OrderStatus.PENDING:
+                logger.info(
+                    "OrderManager [%s]: limit @ %.4f unfilled after %ds — cancelling",
+                    signal.symbol, limit_price, timeout,
+                )
+                try:
+                    self._broker.cancel_order(result.order_id)
+                except BrokerError as exc:
+                    logger.warning(
+                        "OrderManager [%s]: cancel failed — %s", signal.symbol, exc,
+                    )
+                return None
 
         # ── Handle partial fill ─────────────────────────────────────────────
         filled_qty = result.filled_quantity
@@ -402,7 +459,8 @@ class OrderManager:
             if stop_dist > 0:
                 if trade.direction == "long":
                     unrealized_r = (current - trade.entry_price) / stop_dist
-                    if unrealized_r >= 2.0:
+                    if unrealized_r >= 1.5:
+                        # Lock in 50% of open profit — trail stop halfway to current price
                         new_stop = trade.entry_price + (current - trade.entry_price) * 0.5
                         if new_stop > trade.stop_price:
                             old_stop = trade.stop_price
@@ -412,16 +470,18 @@ class OrderManager:
                                 trade.symbol, old_stop, trade.stop_price, unrealized_r,
                             )
                     elif unrealized_r >= be_r:
+                        # Move to breakeven — per-signal threshold (0.75R trend / 0.5R mean-rev)
                         if trade.entry_price > trade.stop_price:
                             old_stop = trade.stop_price
                             trade.stop_price = trade.entry_price
                             logger.info(
-                                "OrderManager TRAIL [%s]: breakeven %.4f→%.4f (unrealized_r=%.2f, be_r=%.1f)",
+                                "OrderManager TRAIL [%s]: breakeven %.4f→%.4f (unrealized_r=%.2f, be_r=%.2f)",
                                 trade.symbol, old_stop, trade.stop_price, unrealized_r, be_r,
                             )
                 else:  # short
                     unrealized_r = (trade.entry_price - current) / stop_dist
-                    if unrealized_r >= 2.0:
+                    if unrealized_r >= 1.5:
+                        # Lock in 50% of open profit
                         new_stop = trade.entry_price - (trade.entry_price - current) * 0.5
                         if new_stop < trade.stop_price:
                             old_stop = trade.stop_price
@@ -431,11 +491,12 @@ class OrderManager:
                                 trade.symbol, old_stop, trade.stop_price, unrealized_r,
                             )
                     elif unrealized_r >= be_r:
+                        # Move to breakeven
                         if trade.entry_price < trade.stop_price:
                             old_stop = trade.stop_price
                             trade.stop_price = trade.entry_price
                             logger.info(
-                                "OrderManager TRAIL [%s]: breakeven %.4f→%.4f (unrealized_r=%.2f, be_r=%.1f)",
+                                "OrderManager TRAIL [%s]: breakeven %.4f→%.4f (unrealized_r=%.2f, be_r=%.2f)",
                                 trade.symbol, old_stop, trade.stop_price, unrealized_r, be_r,
                             )
 
@@ -619,13 +680,15 @@ class OrderManager:
             opened_at=trade.opened_at,
             closed_at=closed_at,
             exit_reason=reason,
+            metadata=dict(trade.signal.metadata) if trade.signal and trade.signal.metadata else {},
         )
 
         with self._lock:
             self._closed_trades.append(ct)
 
-        # Record P&L with risk guard
+        # Record P&L and outcome with risk guard
         self._risk.record_trade_pnl(gross_pnl)
+        self._risk.record_trade_outcome(won=gross_pnl > 0)
 
         logger.info(
             "OrderManager CLOSE [%s] %s x%d @ %.4f | P&L=%.2f | reason=%s | hold=%.0fs",

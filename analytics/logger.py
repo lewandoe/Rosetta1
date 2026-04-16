@@ -95,9 +95,19 @@ class TradeLogger:
                     opened_at       TEXT    NOT NULL,
                     closed_at       TEXT    NOT NULL,
                     exit_reason     TEXT    NOT NULL,
-                    hold_seconds    REAL    NOT NULL
+                    hold_seconds    REAL    NOT NULL,
+                    regime_at_entry TEXT,
+                    atr_at_entry    REAL
                 )
             """)
+            # Backwards-compatible migration for pre-existing DBs missing these columns
+            existing_cols = {row["name"] for row in self._conn.execute(
+                "PRAGMA table_info(trades)"
+            ).fetchall()}
+            if "regime_at_entry" not in existing_cols:
+                self._conn.execute("ALTER TABLE trades ADD COLUMN regime_at_entry TEXT")
+            if "atr_at_entry" not in existing_cols:
+                self._conn.execute("ALTER TABLE trades ADD COLUMN atr_at_entry REAL")
             self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -109,6 +119,15 @@ class TradeLogger:
         Persist a ClosedTrade.  Called by OrderManager via on_trade_closed().
         Thread-safe.  Silently ignores duplicate trade_ids (INSERT OR IGNORE).
         """
+        meta = trade.metadata or {}
+        regime_at_entry = meta.get("regime")
+        atr_at_entry = meta.get("atr")
+        if atr_at_entry is not None:
+            try:
+                atr_at_entry = float(atr_at_entry)
+            except (TypeError, ValueError):
+                atr_at_entry = None
+
         row = (
             trade.trade_id,
             trade.symbol,
@@ -125,6 +144,8 @@ class TradeLogger:
             _iso(trade.closed_at),
             trade.exit_reason,
             trade.hold_seconds,
+            regime_at_entry,
+            atr_at_entry,
         )
         with self._lock:
             self._conn.execute(
@@ -134,8 +155,9 @@ class TradeLogger:
                    entry_price, exit_price, gross_pnl,
                    signal_type, confidence,
                    entry_order_id, exit_order_id,
-                   opened_at, closed_at, exit_reason, hold_seconds)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   opened_at, closed_at, exit_reason, hold_seconds,
+                   regime_at_entry, atr_at_entry)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 row,
             )
@@ -213,6 +235,12 @@ def _iso(dt: datetime) -> str:
 
 
 def _row_to_trade(row: sqlite3.Row) -> ClosedTrade:
+    cols = row.keys()
+    meta: dict = {}
+    if "regime_at_entry" in cols and row["regime_at_entry"] is not None:
+        meta["regime"] = row["regime_at_entry"]
+    if "atr_at_entry" in cols and row["atr_at_entry"] is not None:
+        meta["atr"] = row["atr_at_entry"]
     return ClosedTrade(
         trade_id=row["trade_id"],
         symbol=row["symbol"],
@@ -228,4 +256,5 @@ def _row_to_trade(row: sqlite3.Row) -> ClosedTrade:
         opened_at=datetime.fromisoformat(row["opened_at"]),
         closed_at=datetime.fromisoformat(row["closed_at"]),
         exit_reason=row["exit_reason"],
+        metadata=meta,
     )

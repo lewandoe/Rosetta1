@@ -224,6 +224,9 @@ class Rosetta1:
             except HistoryError as exc:
                 logger.warning("Could not seed bars for %s: %s — skipping", sym, exc)
 
+        # ── Reset daily counters (P&L, loss streak, pause/halt state) ────────
+        self._risk.reset_daily()
+
         # ── Start subsystems ─────────────────────────────────────────────────
         self._om.start()
         self._feed.start()
@@ -266,6 +269,7 @@ class Rosetta1:
             signal: Optional[SignalResult] = self._engine.evaluate(
                 bars, symbol, quote.last,
                 bars_dict=self._bars,
+                quote=quote,
             )
             if signal is None:
                 return

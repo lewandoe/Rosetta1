@@ -31,13 +31,14 @@ import logging
 import math
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 import pytz
 
 from broker.base import AccountInfo, Position, Quote
 from config.settings import settings
+from data.session import is_entry_allowed
 from signals.base import SignalResult
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,11 @@ class RiskGuard:
         self._halt_reason: str = ""
         self._daily_pnl: float = 0.0
 
+        # Consecutive-loss circuit breaker state
+        self._consecutive_losses: int = 0
+        self._paused_until: Optional[datetime] = None
+        self._halted_for_day: bool = False
+
         logger.info(
             "RiskGuard initialised | max_daily_loss=$%.2f | max_positions=%d | "
             "max_day_trades=%d | max_capital_pct=%.0f%%",
@@ -154,11 +160,43 @@ class RiskGuard:
 
         # ── 1. Emergency halt ───────────────────────────────────────────────
         with self._lock:
-            halted = self._emergency_halt
-            halt_reason = self._halt_reason
+            halted         = self._emergency_halt
+            halt_reason    = self._halt_reason
+            halted_for_day = self._halted_for_day
+            paused_until   = self._paused_until
         if halted:
             return _reject("emergency_halt", f"System halted: {halt_reason}")
         passed.append("emergency_halt")
+
+        # ── 1b. Consecutive-loss day halt ───────────────────────────────────
+        if halted_for_day:
+            return _reject(
+                "consecutive_loss_halt",
+                "Halted for day: consecutive loss limit reached",
+            )
+        passed.append("consecutive_loss_halt")
+
+        # ── 1c. Consecutive-loss pause ──────────────────────────────────────
+        if paused_until is not None:
+            now_utc = datetime.now(timezone.utc)
+            if now_utc < paused_until:
+                remaining = int((paused_until - now_utc).total_seconds())
+                return _reject(
+                    "consecutive_loss_pause",
+                    f"Paused after consecutive losses ({remaining}s remaining)",
+                )
+            # Pause has expired — clear it
+            with self._lock:
+                if self._paused_until is not None and datetime.now(timezone.utc) >= self._paused_until:
+                    self._paused_until = None
+                    logger.info("RiskGuard: consecutive-loss pause expired — trading resumed")
+        passed.append("consecutive_loss_pause")
+
+        # ── 1d. Session window — block lunch / pre-market / EOD wind-down ───
+        allowed, session_reason = is_entry_allowed()
+        if not allowed:
+            return _reject("session_window", f"session={session_reason}")
+        passed.append("session_window")
 
         # ── 2. Market hours ─────────────────────────────────────────────────
         if not is_market_open:
@@ -174,6 +212,24 @@ class RiskGuard:
         passed.append("market_hours")
 
         # ── 3. Daily loss limit — skipped in testing mode (limit=$10,000) ────
+
+        # ── 3b. Spread check — skip if bid-ask is too wide ──────────────────
+        # Prefer the live quote (always fresh); fall back to signal metadata
+        # if the quote object lacks bid/ask (e.g. some paper-broker fallbacks).
+        bid = getattr(quote, "bid", None)
+        ask = getattr(quote, "ask", None)
+        if (bid is None or ask is None) and signal.metadata:
+            bid = signal.metadata.get("bid_price", bid)
+            ask = signal.metadata.get("ask_price", ask)
+        if bid and ask and ask > 0:
+            spread_pct = (ask - bid) / ask
+            if spread_pct > settings.risk.max_spread_pct:
+                return _reject(
+                    "spread_filter",
+                    f"Spread too wide: {spread_pct*100:.4f}% > "
+                    f"{settings.risk.max_spread_pct*100:.4f}% (bid={bid:.4f}, ask={ask:.4f})",
+                )
+            passed.append("spread_filter")
 
         # ── 4. Max open positions ────────────────────────────────────────────
         n_positions = len(open_positions)
@@ -218,24 +274,35 @@ class RiskGuard:
         # ── 6. Spread filter — skipped in testing mode ───────────────────────
         #    (yfinance quotes use a synthetic 0.1% spread, not real market data)
 
-        # ── 7. Capital-based position sizing ────────────────────────────────
+        # ── 7. Volatility-normalized position sizing ─────────────────────────
         entry_price = signal.entry_price
         if entry_price <= 0:
             return _reject("capital_limit", "Signal entry_price is zero or negative")
 
-        # Flat capital deployment: 5% of current buying power per trade.
-        # The broker deducts deployed cash automatically, so buying_power
-        # shrinks with each open position — no manual subtraction needed.
-        capital_per_trade = settings.paper_starting_capital * settings.risk.max_capital_per_trade_pct
-        shares = max(
-            settings.risk.min_shares,
-            min(math.floor(capital_per_trade / entry_price), settings.risk.max_shares),
+        stop_distance = abs(signal.entry_price - signal.stop_price)
+        if stop_distance <= 0:
+            return _reject("capital_limit",
+                           f"Zero stop distance for {signal.symbol} — cannot size position")
+
+        # Risk a fixed fraction of buying power per trade, divided by the ATR-
+        # derived stop distance.  Every trade risks the same dollar amount
+        # regardless of how volatile or cheap the symbol is.
+        risk_dollars = account.buying_power * settings.risk.target_risk_per_trade_pct
+        shares = math.floor(risk_dollars / stop_distance)
+
+        # Hard ceiling: never deploy more than max_capital_per_trade_pct of buying power
+        max_shares_by_capital = math.floor(
+            (account.buying_power * settings.risk.max_capital_per_trade_pct) / entry_price
         )
+        capped_by_capital = shares > max_shares_by_capital
+        shares = min(shares, max_shares_by_capital)
+        shares = max(settings.risk.min_shares, min(shares, settings.risk.max_shares))
         capital_used = shares * entry_price
 
         logger.info(
-            "RiskGuard capital check: buying_power=$%.2f, per_trade=$%.2f (fixed 5pct of 100k), shares=%d",
-            account.buying_power, capital_per_trade, shares,
+            "RiskGuard SIZE [%s]: %d shares (risk=$%.2f / stop_dist=$%.4f) "
+            "capped_by_capital=%s",
+            signal.symbol, shares, risk_dollars, stop_distance, capped_by_capital,
         )
 
         if shares < 1 or capital_used > account.buying_power:
@@ -320,6 +387,60 @@ class RiskGuard:
         with self._lock:
             self._daily_pnl = 0.0
         logger.info("RiskGuard: daily P&L counter reset")
+
+    # ------------------------------------------------------------------
+    # Consecutive-loss circuit breaker
+    # ------------------------------------------------------------------
+
+    def record_trade_outcome(self, won: bool) -> None:
+        """
+        Update the consecutive-loss counter after a trade closes.
+
+        Wins reset the streak.  Losses increment it; once the pause
+        threshold is hit the guard pauses for consecutive_loss_pause_minutes;
+        once the halt threshold is hit, trading is halted for the rest of
+        the session.  Called by the order manager from the close callback.
+        """
+        cfg = settings.risk
+        with self._lock:
+            if won:
+                if self._consecutive_losses > 0:
+                    logger.info(
+                        "RiskGuard: streak reset after %d consecutive losses",
+                        self._consecutive_losses,
+                    )
+                self._consecutive_losses = 0
+                return
+
+            self._consecutive_losses += 1
+            streak = self._consecutive_losses
+
+            if streak >= cfg.consecutive_loss_halt_threshold:
+                self._halted_for_day = True
+                logger.warning(
+                    "RiskGuard HALT: %d consecutive losses — halted for the day",
+                    streak,
+                )
+            elif streak >= cfg.consecutive_loss_pause_threshold:
+                self._paused_until = datetime.now(timezone.utc) + timedelta(
+                    minutes=cfg.consecutive_loss_pause_minutes
+                )
+                logger.warning(
+                    "RiskGuard PAUSE: %d consecutive losses — paused until %s",
+                    streak, self._paused_until.isoformat(),
+                )
+
+    def reset_daily(self) -> None:
+        """
+        Reset all daily counters — daily P&L, consecutive-loss streak,
+        pause window, and day-halt flag.  Called at session start.
+        """
+        with self._lock:
+            self._daily_pnl          = 0.0
+            self._consecutive_losses = 0
+            self._paused_until       = None
+            self._halted_for_day     = False
+        logger.info("RiskGuard: daily counters reset (P&L, streak, pause, halt)")
 
     # ------------------------------------------------------------------
     # Emergency halt
